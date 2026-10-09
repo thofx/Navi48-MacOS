@@ -106,8 +106,11 @@ dcn_kext() {
   for f in "${OUT}/kext/fp_control.c" "${DCN}"/*.c; do
     o="${OUT}/kext/$(basename "${f}" .c).o"
     ${N48_KEXT_CC} "${flags[@]}" -std=c11 -c "${f}" -o "${o}"
-    if ${N48_OBJDUMP} -d "${o}" | grep -Eq "${FP_INSN}"; then
-      [ "${f}" = "${OUT}/kext/fp_control.c" ] || { echo "FPU instruction in ${f}:"; ${N48_OBJDUMP} -d "${o}" | grep -E "${FP_INSN}" | head -3; fp=1; }
+    # disassemble to a file: piping into grep -q lets grep exit at the first match, and llvm-objdump then dies of EPIPE
+    # ("IO failure on output stream: Broken pipe"), which pipefail turns into a miss
+    ${N48_OBJDUMP} -d "${o}" > "${o%.o}.dis"
+    if grep -Eq "${FP_INSN}" "${o%.o}.dis"; then
+      [ "${f}" = "${OUT}/kext/fp_control.c" ] || { echo "FPU instruction in ${f}:"; grep -E -m 3 "${FP_INSN}" "${o%.o}.dis"; fp=1; }
     elif [ "${f}" = "${OUT}/kext/fp_control.c" ]; then
       echo "the FP scan missed its positive control"; return 1
     fi
