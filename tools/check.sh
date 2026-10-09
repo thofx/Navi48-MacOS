@@ -8,6 +8,8 @@
 #      classes must match tools/native/navi48metal/protocol-baseline.txt; --update-protocols rewrites it after a deliberate change).
 #   3. the bundle's pure host tests (test-*.c, run against this tree's sources).
 #   4. the dcn41 unit tests (the tools/dcn41/build.py `unit` compile line).
+#   5. Linux's DML2.1, unmodified, on every mode of src/dcn41/dcn41_modes.tsv (tools/dcn41/dml/run.sh): each mode must be
+#      supported, DML's VSTARTUP must not exceed the table's max_vstartup, and DML must not assert.
 # Not here: the kext suites (tools/conductor/suites.sh; many need captured fixtures that are not in the public tree), anything that
 # needs RADV / the GPU, and the planted-break scripts (CI runs tools/native/navi48metal/test-gate-plant.sh).
 set -euo pipefail
@@ -79,6 +81,9 @@ dcn_test() {
 for t in test_dcn41 test_dcn41_dmub test_dcn41_modes test_dcn41_allow test_dcn41_otg_timing; do
   step "${t}" dcn_test "${t}"
 done
+
+# ---- 5. DML2.1 on the precomputed modes ----
+step "dcn41-dml" "${ROOT}/tools/dcn41/dml/run.sh" "${OUT}/dml"
 
 echo "check: ${NFAIL} failed (logs: ${OUT})"
 [ "${NFAIL}" -eq 0 ]
