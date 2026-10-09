@@ -13,6 +13,7 @@
 //   G8  source pins on Navi48Device.m: reachability and order of the gates, the probe last and OTHER-only, the admitted flag set only after the probe;
 //   G9  (0.0.641, G4 review HIGH 2) the probe runs only for euid >= 501: root / daemons are declined by class, first, with 0.0.632's text and no kernel open;
 //   G10 (0.0.641, G4 review LOW) the AIR dump directory: mkdir 0700, lstat, a real directory owned by the caller, never a chmod that follows a link.
+//   G16 (browser gap list) the capability queries browsers branch on (pinned for applications, the base class's for WindowServer), indirect draws / dispatch, the encoders' device.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -318,6 +319,72 @@ int main(int argc, char **argv) {
             CHECK("G15: WindowServer / root never reach the setter (the call is under `if (svcCls)`)", gd && call && before(gd, call) && !has(ro, gd, "if (n48_is_ws()") );
         }
         free(m5); } }
+    // ---- G16 (browser gap list, 2026-10-09): capability queries, indirect draws / dispatch, the encoders' device ----
+    { int any = 0; for (int c = 0; c < N48G_CAP_COUNT; c++) if (c != N48G_CAP_F32_FILTERING && (n48g_cap_app(c, 0) != 0 || n48g_cap_app(c, 1) != 0)) any = 1;
+      CHECK("G16: every pinned capability but 32-bit float filtering is NO / tier none, whatever RADV says", !any); }
+    CHECK("G16: 32-bit float filtering follows RADV's linear-filter answer", n48g_cap_app(N48G_CAP_F32_FILTERING, 1) == 1 && n48g_cap_app(N48G_CAP_F32_FILTERING, 0) == 0);
+    CHECK("G16: the capability ids are 0..7", N48G_CAP_RW_TEXTURE_TIER == 0 && N48G_CAP_F32_FILTERING == 7 && N48G_CAP_COUNT == 8);
+    { char *m6 = slurp(dir, "Navi48Device.m");
+      CHECK("G16: Navi48Device.m is readable", m6 != NULL);
+      if (m6) {
+        static const char *pins[][2] = {
+            { "- (BOOL)areRasterOrderGroupsSupported ", "return n48_cap_bool(self, _cmd, N48G_CAP_RASTER_ORDER); }" },
+            { "- (BOOL)areProgrammableSamplePositionsSupported ", "return n48_cap_bool(self, _cmd, N48G_CAP_SAMPLE_POSITIONS); }" },
+            { "- (BOOL)supportsPullModelInterpolation ", "return n48_cap_bool(self, _cmd, N48G_CAP_PULL_MODEL); }" },
+            { "- (BOOL)supportsShaderBarycentricCoordinates ", "return n48_cap_bool(self, _cmd, N48G_CAP_BARYCENTRICS); }" },
+            { "- (BOOL)areBarycentricCoordsSupported ", "return n48_cap_bool(self, _cmd, N48G_CAP_BARYCENTRICS); }" },
+            { "- (BOOL)supportsBCTextureCompression ", "return n48_cap_bool(self, _cmd, N48G_CAP_BC_TEXTURES); }" },
+            { "- (BOOL)supports32BitFloatFiltering ", "return n48_cap_bool(self, _cmd, N48G_CAP_F32_FILTERING); }" },
+        };
+        for (unsigned i = 0; i < sizeof pins / sizeof pins[0]; i++) {
+            const char *f = fn_start(m6, pins[i][0]); const char *e = f ? strchr(f, '\n') : NULL;
+            char nm[160]; snprintf(nm, sizeof nm, "G16: %s asks n48_cap_bool with its own capability", pins[i][0]);
+            CHECK(nm, f && has(f, e, pins[i][1]));
+        }
+        const char *cb = fn_start(m6, "static Class n48_cap_base(SEL sel) {");
+        CHECK("G16: the base class is asked only by WindowServer, and only when it answers the selector", cb && has(cb, strstr(cb, "\n}\n"), "return (n48_is_ws() && [sc instancesRespondToSelector:sel]) ? sc : Nil;"));
+        const char *cp = fn_start(m6, "static BOOL n48_cap_bool(id dev, SEL sel, int cap) {");
+        const char *cp_end = cp ? strstr(cp, "\n}\n") : NULL;
+        CHECK("G16: n48_cap_bool asks n48_cap_base first, then the pinned answer", cp && before(strstr(cp, "Class b = n48_cap_base(sel);"), strstr(cp, "return n48g_cap_app(cap, cap == N48G_CAP_F32_FILTERING && n48_f32_linear()) ? YES : NO;")) && has(cp, cp_end, "return n48g_cap_app(cap,"));
+        CHECK("G16: a BOOL answer of the base class is read through a BOOL-returning cast", cp && has(cp, cp_end, "return ((BOOL (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, sel); }"));
+        const char *rw = fn_start(m6, "- (MTLReadWriteTextureTier)readWriteTextureSupport {");
+        const char *rw_end = rw ? strstr(rw, "\n}\n") : NULL;
+        CHECK("G16: readWriteTextureSupport: the SDK's type, the base class's tier for WindowServer, tier none for applications", rw && has(rw, rw_end, "Class b = n48_cap_base(_cmd);") && has(rw, rw_end, "((MTLReadWriteTextureTier (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, _cmd)") && has(rw, rw_end, "return (MTLReadWriteTextureTier)n48g_cap_app(N48G_CAP_RW_TEXTURE_TIER, 0);"));
+        const char *rm = fn_start(m6, "- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)n {");
+        const char *rm_end = rm ? strstr(rm, "\n}\n") : NULL;
+        CHECK("G16: rate maps: WindowServer asks the base class (with the layer count), applications get the pinned NO", rm && has(rm, rm_end, "Class b = n48_cap_base(_cmd);") && has(rm, rm_end, "objc_msgSendSuper)(&sup, _cmd, n); }") && has(rm, rm_end, "return n48g_cap_app(N48G_CAP_RATE_MAP, 0) ? YES : NO;"));
+        const char *fl = fn_start(m6, "static BOOL n48_f32_linear(void) {");
+        const char *fl_end = fl ? strstr(fl, "\n}\n") : NULL;
+        CHECK("G16: float filtering needs RADV's linear-filter bit on R32, RG32 and RGBA32 float", fl && has(fl, fl_end, "MTLPixelFormatR32Float, MTLPixelFormatRG32Float, MTLPixelFormatRGBA32Float };") && has(fl, fl_end, "VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) v = NO;"));
+        CHECK("G16: float filtering opens RADV first and is decided once per process", fl && before(strstr(fl, "dispatch_once(&once, ^{"), strstr(fl, "if (!n48_radv_open(NULL)) return;")) && has(fl, fl_end, "if (!n48_radv_open(NULL)) return;"));
+        CHECK("G16: the BC table claim stays honest (no BC format in the pixel-format table)", !strstr(m6, "MTLPixelFormatBC"));
+        CHECK("G16: the indirect entry points are loaded", strstr(m6, "X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect)") != NULL);
+        CHECK("G16: drawIndirectFirstInstance is enabled when the device has it", strstr(m6, ".drawIndirectFirstInstance = pf.drawIndirectFirstInstance,") != NULL);
+        const char *ib = fn_start(m6, "static N48Buffer *n48_indirect_buf(N48CommandBuffer *cb, id b, NSUInteger off, const char *what) {");
+        const char *ib_end = ib ? strstr(ib, "\n}\n") : NULL;
+        CHECK("G16: an indirect argument buffer must be an N48Buffer at a 4-byte aligned offset", ib && has(ib, ib_end, "if (![b isKindOfClass:[N48Buffer class]])") && has(ib, ib_end, "if (off % 4) {"));
+        CHECK("G16: all three indirect entries validate through n48_indirect_buf", strstr(m6, "if (!n48_indirect_buf(_cb, db, doff, \"drawPrimitives:indirectBuffer:\")) return;") && strstr(m6, "if (!n48_indirect_buf(_cb, db, doff, \"drawIndexedPrimitives:indirectBuffer:\")) return;") && strstr(m6, "N48Buffer *b = n48_indirect_buf(_cb, ib, off, \"dispatchThreadgroupsWithIndirectBuffer:\");"));
+        const char *di = fn_start(m6, "- (void)drawPrimitives:(MTLPrimitiveType)t indirectBuffer:(id)db indirectBufferOffset:(NSUInteger)doff {");
+        const char *di_end = di ? strstr(di, "\n}\n") : NULL;
+        CHECK("G16: drawPrimitives:indirectBuffer: prepares the draw, then one vkCmdDrawIndirect at the client's offset", di && before(strstr(di, "n48PrepareDraw:"), strstr(di, "vkCmdDrawIndirect([_cb vk], [(N48Buffer *)db vkBuffer], doff, 1, 0);")) && has(di, di_end, "vkCmdDrawIndirect([_cb vk]") && has(di, di_end, "[_cb n48Retain:db];"));
+        const char *dx = fn_start(m6, "- (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexType:(MTLIndexType)it indexBuffer:(id)ib indexBufferOffset:(NSUInteger)off indirectBuffer:(id)db indirectBufferOffset:(NSUInteger)doff {");
+        const char *dx_end = dx ? strstr(dx, "\n}\n") : NULL;
+        CHECK("G16: the indexed indirect draw binds the index buffer at its offset, then one vkCmdDrawIndexedIndirect at the client's offset", dx && has(dx, dx_end, "vkCmdBindIndexBuffer([_cb vk], [(N48Buffer *)ib vkBuffer], off,") && before(strstr(dx, "vkCmdBindIndexBuffer"), strstr(dx, "vkCmdDrawIndexedIndirect([_cb vk], [(N48Buffer *)db vkBuffer], doff, 1, 0);")) && has(dx, dx_end, "vkCmdDrawIndexedIndirect([_cb vk], [(N48Buffer *)db vkBuffer], doff, 1, 0);"));
+        const char *nd = fn_start(m6, "- (void)n48Dispatch:(MTLSize)grid tpt:(MTLSize)tpt exactThreads:(BOOL)exact indirect:(N48Buffer *)ib offset:(NSUInteger)ioff {");
+        const char *nd_end = nd ? strstr(nd, "\n}\n") : NULL;
+        CHECK("G16: an indirect dispatch is refused for a ThreadsDynamic module (regions are planned from the CPU grid)", nd && has(nd, nd_end, "if (ib && ([_pso mode] != 0 || !vkCmdDispatchIndirect)) {"));
+        CHECK("G16: the Workgroups path dispatches indirectly at the client's offset", nd && has(nd, nd_end, "if (ib) { [_cb n48Retain:ib]; vkCmdDispatchIndirect(cmd, [ib vkBuffer], ioff); }"));
+        CHECK("G16: an empty CPU grid still returns early, an indirect one does not", nd && has(nd, nd_end, "if (!ib && (!g[0] || !g[1] || !g[2])) return;"));
+        static const char *encs[] = { "@implementation N48RenderEncoder\n", "@implementation N48ComputeEncoder", "@implementation N48BlitEncoder" };
+        for (unsigned i = 0; i < sizeof encs / sizeof encs[0]; i++) {
+            const char *en = strstr(m6, encs[i]); const char *en_end = en ? strstr(en, "\n@end") : NULL;
+            char nm[160];
+            snprintf(nm, sizeof nm, "G16: %.*s has insertDebugSignpost:", (int)strcspn(encs[i] + 16, "\n"), encs[i] + 16);
+            CHECK(nm, en && has(en, en_end, "- (void)insertDebugSignpost:(NSString *)s { (void)s; }"));
+            snprintf(nm, sizeof nm, "G16: %.*s answers device with its command buffer's", (int)strcspn(encs[i] + 16, "\n"), encs[i] + 16);
+            CHECK(nm, en && has(en, en_end, "- (id)device { return [_cb device]; }"));
+        }
+        free(m6); } }
     // ---- G11 (0.0.641): the bundle build ----
     { char *pl = slurp(dir, "Info.plist");
       CHECK("G11: Info.plist: bundle version 0.1.1, build 20", pl && strstr(pl, "<key>CFBundleShortVersionString</key>\n\t<string>0.1.1</string>") && strstr(pl, "<key>CFBundleVersion</key>\n\t<string>20</string>"));

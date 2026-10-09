@@ -293,11 +293,13 @@ static const char *n48_admit(uint32_t port) {
     }
     return NULL;
 }
+#if N48_9D   // its only caller, -isHeadless, is a 9d override: N48_9D=0 build.sh failed on -Wunused-function
 static BOOL n48_headless(void) {
     static BOOL v; static dispatch_once_t once;
     dispatch_once(&once, ^{ struct stat st; v = stat(N48_HEADLESS_NO, &st) != 0; });
     return v;
 }
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------
 // Lazy in-process RADV (NATIVE-S4-M10 route a', F5). Opened on the first resource/queue request, NEVER in
@@ -325,7 +327,8 @@ static BOOL n48_headless(void) {
     X(vkGetPhysicalDeviceFormatProperties) X(vkGetPhysicalDeviceImageFormatProperties) \
     X(vkCreatePipelineCache) X(vkGetPipelineCacheData) \
     X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkGetQueryPoolResults) X(vkGetFenceStatus) /* build 18 (P2) */ \
-    X(vkCmdResolveImage) X(vkCmdSetStencilReference) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBias)
+    X(vkCmdResolveImage) X(vkCmdSetStencilReference) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBias) \
+    X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect)   /* browser gap list: indirect draws / dispatch */
 #define X(n) static PFN_##n n;
 N48_VK_FUNCS(X)
 #undef X
@@ -562,6 +565,7 @@ static BOOL n48_radv_open_once(NSError **err) {
         VkPhysicalDeviceFeatures ef = { .shaderInt64 = pf.shaderInt64, .fragmentStoresAndAtomics = pf.fragmentStoresAndAtomics, .shaderStorageImageReadWithoutFormat = pf.shaderStorageImageReadWithoutFormat,
                                         .shaderStorageImageWriteWithoutFormat = pf.shaderStorageImageWriteWithoutFormat,
                                         .depthBiasClamp = pf.depthBiasClamp,   // bundle 10: setDepthBias:slopeScale:clamp:
+                                        .drawIndirectFirstInstance = pf.drawIndirectFirstInstance,   // indirect draws: Metal's baseInstance lands in firstInstance
                                         .occlusionQueryPrecise = pf.occlusionQueryPrecise };   // build 18 (P2): Counting visibility mode
         N48LOG("radv: apiVersion %u.%u shaderInt64 supported %u, storage image read/write without format %u/%u", VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion), pf.shaderInt64,
                pf.shaderStorageImageReadWithoutFormat, pf.shaderStorageImageWriteWithoutFormat);
@@ -4153,7 +4157,7 @@ N48_DNR(N48RenderPipelineState)
 - (NSString *)label { return _lbl; }
 - (void)setLabel:(NSString *)l { _lbl = [l copy]; }
 - (NSUInteger)maxTotalThreadsPerThreadgroup { return 0; }
-- (NSUInteger)threadgroupSizeMatchesTileSize { return 0; }
+- (BOOL)threadgroupSizeMatchesTileSize { return NO; }   // MTLRenderPipelineState declares BOOL (tools/check-protocols.py)
 - (NSUInteger)imageblockSampleLength { return 0; }
 - (BOOL)supportIndirectCommandBuffers { return NO; }
 @end
@@ -5142,6 +5146,13 @@ static VkRenderPass n48_mk_rp_c(const VkAttachmentDescription *ads, uint32_t na,
 - (instancetype)initWithCommandBuffer:(id)cb descriptor:(MTLRenderPassDescriptor *)d;
 @end
 
+// The argument buffer of an indirect draw / dispatch: an N48Buffer at a 4-byte aligned offset (Metal's and Vulkan's rule alike); otherwise the command
+// buffer fails with the reason and the caller encodes nothing.
+static N48Buffer *n48_indirect_buf(N48CommandBuffer *cb, id b, NSUInteger off, const char *what) {
+    if (![b isKindOfClass:[N48Buffer class]]) { [cb n48Fail:[NSString stringWithFormat:@"%s indirect buffer is not an N48Buffer", what]]; return nil; }
+    if (off % 4) { [cb n48Fail:[NSString stringWithFormat:@"%s indirect buffer offset %lu is not a multiple of 4", what, (unsigned long)off]]; return nil; }
+    return b;
+}
 @implementation N48RenderEncoder
 - (instancetype)initWithCommandBuffer:(id)cb descriptor:(MTLRenderPassDescriptor *)d {
     self = [super initWithCommandBuffer:cb];
@@ -5404,6 +5415,7 @@ N48_ENCODER_NOOPS
 - (void)pushDebugGroup:(NSString *)s { (void)s; }
 - (void)popDebugGroup {}
 - (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
 
 - (N48StageState *)n48Stage:(BOOL)frag { return frag ? &_sf : &_sv; }
 - (void)n48SetBuffer:(id)buf offset:(NSUInteger)off index:(NSUInteger)i frag:(BOOL)f {
@@ -5639,6 +5651,28 @@ N48_ENCODER_NOOPS
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)c indexType:(MTLIndexType)it indexBuffer:(id)ib indexBufferOffset:(NSUInteger)off {
     [self drawIndexedPrimitives:t indexCount:c indexType:it indexBuffer:ib indexBufferOffset:off instanceCount:1 baseVertex:0 baseInstance:0];
 }
+// Indirect draws (browser gap list: Skia, WebKit, Dawn). MTLDrawPrimitivesIndirectArguments / MTLDrawIndexedPrimitivesIndirectArguments are VkDrawIndirectCommand /
+// VkDrawIndexedIndirectCommand field for field (indexStart = firstIndex relative to the bound index offset, baseVertex = vertexOffset). A GPU write of the arguments earlier in
+// this command buffer is ordered by the full barrier every compute / blit encoder ends with.
+- (void)drawPrimitives:(MTLPrimitiveType)t indirectBuffer:(id)db indirectBufferOffset:(NSUInteger)doff {
+    if (!n48_indirect_buf(_cb, db, doff, "drawPrimitives:indirectBuffer:")) return;
+    if (!vkCmdDrawIndirect) { [_cb n48Fail:@"RADV does not expose vkCmdDrawIndirect"]; return; }
+    _dvc = 0;   // the count is in GPU memory
+    if (![self n48PrepareDraw:n48_topo(t)]) return;
+    [_cb n48Retain:db];
+    vkCmdDrawIndirect([_cb vk], [(N48Buffer *)db vkBuffer], doff, 1, 0);
+}
+- (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexType:(MTLIndexType)it indexBuffer:(id)ib indexBufferOffset:(NSUInteger)off indirectBuffer:(id)db indirectBufferOffset:(NSUInteger)doff {
+    if (![ib isKindOfClass:[N48Buffer class]]) { [_cb n48Fail:@"drawIndexedPrimitives:indirectBuffer: index buffer is not an N48Buffer"]; return; }
+    if (off % (it == MTLIndexTypeUInt32 ? 4 : 2)) { [_cb n48Fail:@"index buffer offset is not a multiple of the index size"]; return; }
+    if (!n48_indirect_buf(_cb, db, doff, "drawIndexedPrimitives:indirectBuffer:")) return;
+    if (!vkCmdDrawIndexedIndirect) { [_cb n48Fail:@"RADV does not expose vkCmdDrawIndexedIndirect"]; return; }
+    _dvc = 0;
+    if (![self n48PrepareDraw:n48_topo(t)]) return;
+    [_cb n48Retain:ib]; [_cb n48Retain:db];
+    vkCmdBindIndexBuffer([_cb vk], [(N48Buffer *)ib vkBuffer], off, it == MTLIndexTypeUInt32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    vkCmdDrawIndexedIndirect([_cb vk], [(N48Buffer *)db vkBuffer], doff, 1, 0);
+}
 - (void)endEncoding {
     if (_ended) return;
     if (!_begun && ![_cb n48Error]) [self n48BeginPass];   // a clear-only encoder still has to run its load action
@@ -5709,10 +5743,13 @@ N48_ENCODER_NOOPS
 - (void)pushDebugGroup:(NSString *)s { (void)s; }
 - (void)popDebugGroup {}
 - (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
 
 // grid: threads (dispatchThreads) or groups*tpt (dispatchThreadgroups). The Metal call's threadsPerThreadgroup must equal the local size the
 // module was translated with (meta local_size); otherwise the command buffer completes with an NSError instead of dispatching.
-- (void)n48Dispatch:(MTLSize)grid tpt:(MTLSize)tpt exactThreads:(BOOL)exact {
+// ib: dispatchThreadgroupsWithIndirectBuffer: (browser gap list); MTLDispatchThreadgroupsIndirectArguments is VkDispatchIndirectCommand. Workgroups modules only: a ThreadsDynamic
+// module plans its regions (and push constants) from the grid on the CPU, and the grid is in GPU memory. With ib, `grid` is not read.
+- (void)n48Dispatch:(MTLSize)grid tpt:(MTLSize)tpt exactThreads:(BOOL)exact indirect:(N48Buffer *)ib offset:(NSUInteger)ioff {
     if (_ended) { [_cb n48Fail:@"dispatch after endEncoding"]; return; }
     if ([_cb n48Error]) return;
     if (!_pso) { [_cb n48Fail:@"dispatch without a compute pipeline state"]; return; }
@@ -5720,6 +5757,7 @@ N48_ENCODER_NOOPS
       if (r) { _pso = r; [_cb n48Retain:r]; N48LOGR("HOT-SWAP: compute encoder now uses the real pipeline %p", (__bridge void *)r); } }
     if ([_pso noop]) { N48LOGR("COMPUTE FALLBACK: dispatch %lux%lux%lu (tpt %lux%lux%lu) skipped, placeholder pipeline encodes nothing", (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, (unsigned long)tpt.width, (unsigned long)tpt.height, (unsigned long)tpt.depth); return; }
     uint32_t nom[3] = { [_pso nominalLocal][0], [_pso nominalLocal][1], [_pso nominalLocal][2] };
+    if (ib && ([_pso mode] != 0 || !vkCmdDispatchIndirect)) { [_cb n48Fail:@"dispatchThreadgroupsWithIndirectBuffer: needs a Workgroups translation (a ThreadsDynamic module plans its regions from the grid on the CPU) and vkCmdDispatchIndirect"]; return; }
     if ([_pso mode] == 1) {
         // #12 R2: a ThreadsDynamic module declares its local size through spec ids 0..2 (checked: every kernel in spvcache), so the
         // dispatch's own threadsPerThreadgroup is the nominal local size; a pipeline variant per (x,y,z) is built lazily and cached.
@@ -5735,7 +5773,7 @@ N48_ENCODER_NOOPS
         [_cb n48Fail:[NSString stringWithFormat:@"threadsPerThreadgroup %lux%lux%lu != the SPIR-V local size %ux%ux%u the kernel was translated with (metal2vulkan --local; this module is Workgroups, local size is not specialisable)",
                       (unsigned long)tpt.width, (unsigned long)tpt.height, (unsigned long)tpt.depth, nom[0], nom[1], nom[2]]]; return; }
     uint32_t g[3] = { (uint32_t)grid.width, (uint32_t)grid.height, (uint32_t)grid.depth };
-    if (!g[0] || !g[1] || !g[2]) return;
+    if (!ib && (!g[0] || !g[1] || !g[2])) return;
     id dev = [_cb device];
     n48_each_tex([_pso pb], [_pso npb], &_st, dev, ^(N48Texture *t, VkImageLayout l) { n48_ios_usek(self->_cb, t, YES, l == VK_IMAGE_LAYOUT_GENERAL, N48DF_W_COMPUTE); n48_tex_to([self->_cb vk], t, l); });
     VkCommandBuffer cmd = [_cb vk];
@@ -5745,7 +5783,8 @@ N48_ENCODER_NOOPS
         if (exact && (g[0] % nom[0] || g[1] % nom[1] || g[2] % nom[2])) { [_cb n48Fail:@"dispatchThreads with a partial boundary threadgroup needs a ThreadsDynamic translation (this module is Workgroups)"]; return; }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, [_pso pipelineForLocal:nom]);
         if (s) vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, [_pso layout], 0, 1, &s, 0, NULL);
-        vkCmdDispatch(cmd, exact ? g[0] / nom[0] : g[0], exact ? g[1] / nom[1] : g[1], exact ? g[2] / nom[2] : g[2]);
+        if (ib) { [_cb n48Retain:ib]; vkCmdDispatchIndirect(cmd, [ib vkBuffer], ioff); }
+        else vkCmdDispatch(cmd, exact ? g[0] / nom[0] : g[0], exact ? g[1] / nom[1] : g[1], exact ? g[2] / nom[2] : g[2]);
     } else {                  // ThreadsDynamic: the metal2vulkan region plan, one dispatch per region
         N48Region reg[8]; uint32_t threads[3], tgpg[3];
         for (int d = 0; d < 3; d++) { threads[d] = exact ? g[d] : g[d] * nom[d]; tgpg[d] = (threads[d] + nom[d] - 1) / nom[d]; }
@@ -5762,8 +5801,12 @@ N48_ENCODER_NOOPS
     }
     n48_full_barrier(cmd);
 }
-- (void)dispatchThreadgroups:(MTLSize)g threadsPerThreadgroup:(MTLSize)t { [self n48Dispatch:g tpt:t exactThreads:NO]; }
-- (void)dispatchThreads:(MTLSize)g threadsPerThreadgroup:(MTLSize)t { [self n48Dispatch:g tpt:t exactThreads:YES]; }
+- (void)dispatchThreadgroups:(MTLSize)g threadsPerThreadgroup:(MTLSize)t { [self n48Dispatch:g tpt:t exactThreads:NO indirect:nil offset:0]; }
+- (void)dispatchThreads:(MTLSize)g threadsPerThreadgroup:(MTLSize)t { [self n48Dispatch:g tpt:t exactThreads:YES indirect:nil offset:0]; }
+- (void)dispatchThreadgroupsWithIndirectBuffer:(id)ib indirectBufferOffset:(NSUInteger)off threadsPerThreadgroup:(MTLSize)t {
+    N48Buffer *b = n48_indirect_buf(_cb, ib, off, "dispatchThreadgroupsWithIndirectBuffer:");
+    if (b) [self n48Dispatch:MTLSizeMake(0, 0, 0) tpt:t exactThreads:NO indirect:b offset:off];   // the grid is in b
+}
 - (void)endEncoding {
     if (_ended) return;
     _ended = YES;
@@ -5917,6 +5960,8 @@ N48_ENCODER_NOOPS
 - (void)synchronizeTexture:(id)t slice:(NSUInteger)s level:(NSUInteger)l { (void)t; (void)s; (void)l; }
 - (void)pushDebugGroup:(NSString *)s { (void)s; }
 - (void)popDebugGroup {}
+- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
 - (void)endEncoding {
     if (_ended) return;
     _ended = YES;
@@ -6282,6 +6327,45 @@ static void n48_census_log(void) {
         }
     }
     N48_ONCE("argumentBuffersSupport -> Tier1 (0) for this application: argument buffers beyond the basics are not implemented"); return (NSUInteger)N48G_ARGBUF_TIER1; }
+// Capability queries browsers branch on (n48_gate.h N48G_CAP_*): an application gets the pinned answer, WindowServer the base class's, as argumentBuffersSupport above.
+// The base class to ask instead of the pinned answer, or Nil.
+static Class n48_cap_base(SEL sel) {
+    Class sc = [MTLIOAccelDevice class];
+    return (n48_is_ws() && [sc instancesRespondToSelector:sel]) ? sc : Nil;
+}
+// RADV's answer, fixed for the process: ANGLE asks while it creates its display, before any resource has opened RADV, and must not see NO now and YES later.
+static BOOL n48_f32_linear(void) {
+    static const MTLPixelFormat f[] = { MTLPixelFormatR32Float, MTLPixelFormatRG32Float, MTLPixelFormatRGBA32Float };
+    static BOOL v; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if (!n48_radv_open(NULL)) return;   // no RADV: NO
+        v = YES;
+        for (unsigned i = 0; i < sizeof f / sizeof *f; i++) if (!(n48_fmt_feats(n48_fmt(f[i])) & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) v = NO;
+    });
+    return v;
+}
+static BOOL n48_cap_bool(id dev, SEL sel, int cap) {
+    Class b = n48_cap_base(sel);
+    if (b) { struct objc_super sup = { dev, b }; return ((BOOL (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, sel); }
+    return n48g_cap_app(cap, cap == N48G_CAP_F32_FILTERING && n48_f32_linear()) ? YES : NO;
+}
+- (MTLReadWriteTextureTier)readWriteTextureSupport {
+    Class b = n48_cap_base(_cmd);
+    if (b) { struct objc_super sup = { self, b }; return ((MTLReadWriteTextureTier (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, _cmd); }
+    return (MTLReadWriteTextureTier)n48g_cap_app(N48G_CAP_RW_TEXTURE_TIER, 0);
+}
+- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)n {
+    Class b = n48_cap_base(_cmd);
+    if (b) { struct objc_super sup = { self, b }; return ((BOOL (*)(struct objc_super *, SEL, NSUInteger))objc_msgSendSuper)(&sup, _cmd, n); }
+    return n48g_cap_app(N48G_CAP_RATE_MAP, 0) ? YES : NO;
+}
+- (BOOL)areRasterOrderGroupsSupported           { return n48_cap_bool(self, _cmd, N48G_CAP_RASTER_ORDER); }
+- (BOOL)areProgrammableSamplePositionsSupported { return n48_cap_bool(self, _cmd, N48G_CAP_SAMPLE_POSITIONS); }
+- (BOOL)supportsPullModelInterpolation          { return n48_cap_bool(self, _cmd, N48G_CAP_PULL_MODEL); }
+- (BOOL)supportsShaderBarycentricCoordinates    { return n48_cap_bool(self, _cmd, N48G_CAP_BARYCENTRICS); }
+- (BOOL)areBarycentricCoordsSupported           { return n48_cap_bool(self, _cmd, N48G_CAP_BARYCENTRICS); }
+- (BOOL)supportsBCTextureCompression            { return n48_cap_bool(self, _cmd, N48G_CAP_BC_TEXTURES); }
+- (BOOL)supports32BitFloatFiltering             { return n48_cap_bool(self, _cmd, N48G_CAP_F32_FILTERING); }
 - (NSUInteger)maxBufferLength                { return (NSUInteger)N48_MAX_BUFFER_LENGTH; }
 - (uint64_t)recommendedMaxWorkingSetSize     { return N48_RECOMMENDED_WORKING_SET; }
 - (BOOL)hasUnifiedMemory { return NO; }

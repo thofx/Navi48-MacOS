@@ -1,0 +1,24 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/navi48-check
+          key: navi48-check-${{ hashFiles('tools/check-deps.sh') }}
+      - name: Bundle cross-compile, bundle and dcn41 host tests
+        run: tools/check.sh
+      - name: Planted breaks for test-gate
+        run: |
+          sudo apt-get install -y --no-install-recommends zsh
+          tools/native/navi48metal/test-gate-plant.sh

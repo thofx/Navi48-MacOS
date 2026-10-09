@@ -140,5 +140,88 @@ plant 96 $G "#define N48G_MESA_SETTER      \"radv_darwin_set_service_class\"" "#
 plant 97 $M "const int src = setSvc(svcCls);
                 if (src != 0) {" "const int src = setSvc(svcCls); (void)src;
                 if (0) {" "G6 97: a refused service name is ignored"
+# ---- G16 (browser gap list): capability queries, indirect draws / dispatch, the encoders' device ----
+plant 100 $G "return cap == N48G_CAP_F32_FILTERING ? (f32LinearOK ? 1ul : 0ul) : 0ul;" "(void)cap; (void)f32LinearOK; return 1ul;" "G16 100: every capability is claimed (BC textures, raster order groups ... for applications)"
+plant 101 $M "return (n48_is_ws() && [sc instancesRespondToSelector:sel]) ? sc : Nil;" "(void)sel; return Nil;" "G16 101: WindowServer loses the base class's answers"
+plant 102 $M "return n48_cap_bool(self, _cmd, N48G_CAP_BC_TEXTURES); }" "return n48_cap_bool(self, _cmd, N48G_CAP_F32_FILTERING); }" "G16 102: BC compression answers with the float-filtering capability"
+plant 103 $M "MTLPixelFormatR32Float, MTLPixelFormatRG32Float, MTLPixelFormatRGBA32Float };" "MTLPixelFormatR32Float, MTLPixelFormatRG32Float };" "G16 103: float filtering is claimed without checking RGBA32Float"
+plant 104 $M "if (ib && ([_pso mode] != 0 || !vkCmdDispatchIndirect)) {" "if (0) {" "G16 104: an indirect dispatch runs a ThreadsDynamic module without its region plan"
+plant 105 $M "vkCmdDrawIndirect([_cb vk], [(N48Buffer *)db vkBuffer], doff, 1, 0);" "vkCmdDrawIndirect([_cb vk], [(N48Buffer *)db vkBuffer], 0, 1, 0);" "G16 105: the indirect draw ignores the client's offset"
+plant 106 $M "                                        .drawIndirectFirstInstance = pf.drawIndirectFirstInstance,   // indirect draws: Metal's baseInstance lands in firstInstance
+" "" "G16 106: drawIndirectFirstInstance is not enabled (a non-zero baseInstance is undefined)"
+plant 107 $M "return ((BOOL (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, sel); }" "return (BOOL)((NSUInteger (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, sel); }" "G16 107: a BOOL answer is read as an NSUInteger (garbage in the upper bits)"
+plant 108 $M "return n48g_cap_app(N48G_CAP_RATE_MAP, 0) ? YES : NO;" "return YES;" "G16 108: applications are told rasterization rate maps work"
+plant 109 $M "return (MTLReadWriteTextureTier)n48g_cap_app(N48G_CAP_RW_TEXTURE_TIER, 0);" "return MTLReadWriteTextureTier2;" "G16 109: applications are told read_write textures are tier 2"
+plant 110 $M "    { MTLPixelFormatRGBA8Unorm_sRGB, VK_FORMAT_R8G8B8A8_SRGB,  4, 0 },
+" "    { MTLPixelFormatRGBA8Unorm_sRGB, VK_FORMAT_R8G8B8A8_SRGB,  4, 0 },
+    { MTLPixelFormatBC1_RGBA,        VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 8, 0 },
+" "G16 110: a BC format joins the table while BC compression is still pinned NO"
+plant 111 $M "X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect)" "X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect)" "G16 111: vkCmdDispatchIndirect is never loaded"
+plant 112 $M "vkCmdDrawIndexedIndirect([_cb vk], [(N48Buffer *)db vkBuffer], doff, 1, 0);" "vkCmdDrawIndexedIndirect([_cb vk], [(N48Buffer *)db vkBuffer], 0, 1, 0);" "G16 112: the indexed indirect draw ignores the client's offset"
+plant 113 $M "    if (off % 4) { [cb n48Fail:" "    if (0) { [cb n48Fail:" "G16 113: a misaligned indirect offset reaches Vulkan"
+plant 114 $M "vkCmdDispatchIndirect(cmd, [ib vkBuffer], ioff); }" "vkCmdDispatchIndirect(cmd, [ib vkBuffer], 0); }" "G16 114: the indirect dispatch ignores the client's offset"
+plant 115 $M "if (!ib && (!g[0] || !g[1] || !g[2])) return;" "if (!g[0] || !g[1] || !g[2]) return;" "G16 115: every indirect dispatch is dropped (its CPU grid is 0x0x0)"
+plant 116 $M "- (void)synchronizeTexture:(id)t slice:(NSUInteger)s level:(NSUInteger)l { (void)t; (void)s; (void)l; }
+- (void)pushDebugGroup:(NSString *)s { (void)s; }
+- (void)popDebugGroup {}
+- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+" "- (void)synchronizeTexture:(id)t slice:(NSUInteger)s level:(NSUInteger)l { (void)t; (void)s; (void)l; }
+- (void)pushDebugGroup:(NSString *)s { (void)s; }
+- (void)popDebugGroup {}
+" "G16 116: the blit encoder loses insertDebugSignpost:"
+plant 117 $M "- (void)popDebugGroup {}
+- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
+- (void)endEncoding {
+    if (_ended) return;
+    _ended = YES;
+    n48_full_barrier" "- (void)popDebugGroup {}
+- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (void)endEncoding {
+    if (_ended) return;
+    _ended = YES;
+    n48_full_barrier" "G16 117: the blit encoder loses device"
+plant 118 $M "if (!n48_indirect_buf(_cb, db, doff, \"drawIndexedPrimitives:indirectBuffer:\")) return;" "" "G16 118: the indexed indirect draw skips the argument-buffer checks"
+plant 119 $M "if (!n48_radv_open(NULL)) return;   // no RADV: NO" "if (!N48R.ok) return;" "G16 119: float filtering answers NO whenever it is asked before the first resource (ANGLE's case)"
+plant 120 $M "    dispatch_once(&once, ^{
+        if (!n48_radv_open(NULL))" "    (void)once; (^{
+        if (!n48_radv_open(NULL))" "G16 120: the float-filtering answer is recomputed on every call (NO first, YES later)"
+plant 121 $M "return n48_cap_bool(self, _cmd, N48G_CAP_RASTER_ORDER); }" "return n48_cap_bool(self, _cmd, N48G_CAP_F32_FILTERING); }" "G16 121: raster order groups answer with the float-filtering capability"
+plant 122 $M "return n48_cap_bool(self, _cmd, N48G_CAP_SAMPLE_POSITIONS); }" "return YES; }" "G16 122: programmable sample positions are claimed"
+plant 123 $M "return n48_cap_bool(self, _cmd, N48G_CAP_PULL_MODEL); }" "return YES; }" "G16 123: pull-model interpolation is claimed"
+plant 124 $M "- (BOOL)supportsShaderBarycentricCoordinates    { return n48_cap_bool(self, _cmd, N48G_CAP_BARYCENTRICS); }" "- (BOOL)supportsShaderBarycentricCoordinates    { return YES; }" "G16 124: shader barycentrics are claimed"
+plant 125 $M "- (BOOL)areBarycentricCoordsSupported           { return n48_cap_bool(self, _cmd, N48G_CAP_BARYCENTRICS); }" "- (BOOL)areBarycentricCoordsSupported           { return YES; }" "G16 125: barycentric coordinates are claimed (the older selector)"
+plant 126 $M "return n48_cap_bool(self, _cmd, N48G_CAP_F32_FILTERING); }" "return YES; }" "G16 126: float filtering is claimed without asking RADV"
+plant 127 $G "return cap == N48G_CAP_F32_FILTERING ? (f32LinearOK ? 1ul : 0ul) : 0ul;" "return cap == N48G_CAP_F32_FILTERING ? 1ul : 0ul;" "G16 127: float filtering is claimed whatever RADV says"
+plant 128 $G "#define N48G_CAP_COUNT             8" "#define N48G_CAP_COUNT             7" "G16 128: the capability loop stops before float filtering's id"
+plant 129 $M "Class b = n48_cap_base(sel);" "Class b = Nil; (void)n48_cap_base;" "G16 129: n48_cap_bool never asks the base class (WindowServer gets the pinned answers)"
+plant 130 $M "objc_msgSendSuper)(&sup, _cmd, n); }" "objc_msgSendSuper)(&sup, _cmd, 0); }" "G16 130: WindowServer's rate-map question loses its layer count"
+plant 131 $M "    if (![b isKindOfClass:[N48Buffer class]]) { [cb n48Fail:" "    if (0) { [cb n48Fail:" "G16 131: a foreign object is used as the indirect argument buffer"
+plant 132 $M "    [_cb n48Retain:db];
+    vkCmdDrawIndirect" "    vkCmdDrawIndirect" "G16 132: the indirect draw does not keep its argument buffer alive"
+plant 133 $M "- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
+
+- (N48StageState *)n48Stage" "- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+
+- (N48StageState *)n48Stage" "G16 133: the render encoder loses device"
+plant 134 $M "- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
+
+- (N48StageState *)n48Stage" "- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
+
+- (N48StageState *)n48Stage" "G16 134: the render encoder loses insertDebugSignpost:"
+plant 135 $M "- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
+
+// grid: threads" "- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+
+// grid: threads" "G16 135: the compute encoder loses device"
+plant 136 $M "- (void)insertDebugSignpost:(NSString *)s { (void)s; }
+- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
+
+// grid: threads" "- (id)device { return [_cb device]; }   // browser gap list: an encoder's device is its command buffer's
+
+// grid: threads" "G16 136: the compute encoder loses insertDebugSignpost:"
 echo "test-gate-plant: $((total - 1)) plants (+ the baseline), $escaped escaped or did not apply"
 [ $escaped -eq 0 ]

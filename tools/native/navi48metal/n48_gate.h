@@ -209,4 +209,22 @@ static inline int n48g_supports_family(long family, int isWs) {
     }
 }
 
+// ---- capability queries browsers ask before picking a path (browser gap list, tools/native/mtlgap; 2026-10-09) ----
+// ANGLE, Skia and WebKit ask these MTLDevice properties and take the matching path on YES; none of them is implemented by this bundle, and the MTLIOAccelDevice base's answer is
+// unknown (an AMD-class YES would send ANGLE into BC textures this bundle refuses with nil, or into raster-order-group / barycentric shaders the translator does not emit). So an
+// application gets the pinned answer below; WindowServer keeps the base class's answer, as for argumentBuffersSupport (its display path has run with it).
+// The one capability the hardware decides: 32-bit float linear filtering, YES only when RADV reports SAMPLED_IMAGE_FILTER_LINEAR for R32/RG32/RGBA32 float.
+#define N48G_CAP_RW_TEXTURE_TIER   0   // readWriteTextureSupport             -> MTLReadWriteTextureTierNone (read_write textures are not verified through the translator)
+#define N48G_CAP_RASTER_ORDER      1   // areRasterOrderGroupsSupported       -> NO
+#define N48G_CAP_SAMPLE_POSITIONS  2   // areProgrammableSamplePositionsSupported -> NO (setSamplePositions:count: is not implemented)
+#define N48G_CAP_PULL_MODEL        3   // supportsPullModelInterpolation      -> NO
+#define N48G_CAP_BARYCENTRICS      4   // supportsShaderBarycentricCoordinates / areBarycentricCoordsSupported -> NO
+#define N48G_CAP_RATE_MAP          5   // supportsRasterizationRateMapWithLayerCount: -> NO
+#define N48G_CAP_BC_TEXTURES       6   // supportsBCTextureCompression        -> NO (no BC format in the bundle's pixel-format table)
+#define N48G_CAP_F32_FILTERING     7   // supports32BitFloatFiltering         -> RADV's answer
+#define N48G_CAP_COUNT             8
+static inline unsigned long n48g_cap_app(int cap, int f32LinearOK) {
+    return cap == N48G_CAP_F32_FILTERING ? (f32LinearOK ? 1ul : 0ul) : 0ul;   // every other capability: NO / tier none
+}
+
 #endif /* N48_GATE_H */
