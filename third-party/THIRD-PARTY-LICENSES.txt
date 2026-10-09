@@ -95,8 +95,8 @@ OTHER DEALINGS IN THE SOFTWARE.
 ==========================================================================
 Linux AMD GPU driver code (MIT)  https://git.kernel.org/torvalds/linux
 drivers/gpu/drm/amd (amdgpu, display/dc, dmub, pm, include). src/dcn41 derives
-register definitions and programming sequences from it; tools/dcn41 compiles
-unmodified DC sources on the build host for comparison. See
+register definitions, programming sequences and the DP link training from it;
+tools/dcn41 compiles unmodified DC sources on the build host for comparison. See
 src/navi48-bringup/NOTICE for what is used and the two register headers that
 carry no licence text.
 ==========================================================================

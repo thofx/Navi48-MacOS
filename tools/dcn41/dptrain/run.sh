@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # run.sh - build and run the dptrain harness: Linux's DP link training (unmodified) against src/dcn41/dcn41_dp_train.c.
 #   tools/dcn41/dptrain/run.sh [-v SCENARIO] [out-dir]     (default out-dir: ${N48_CACHE:-~/.cache/navi48-check}/dptrain-out)
-# Linux objects: dc/link/protocols/link_dp_training.c, link_dp_training_8b_10b.c, link_dp_phy.c at the commit
-# tools/check-deps.sh pins. The symbols they reference that linux_side.c does not define get a generated stub that
-# aborts with the symbol's name if a scenario ever calls it (the scenarios reach none of them).
+# Linux objects, at the commit tools/check-deps.sh pins: dc/link/protocols/link_dp_training.c, link_dp_training_8b_10b.c,
+# link_dp_phy.c, link_dp_capability.c (the fallback policy), link_edp_panel_control.c (the panel-mode step) and
+# dc/link/link_validation.c (the link bandwidth). The
+# symbols they reference that linux_side.c does not define get a generated stub that aborts with the symbol's name if a
+# scenario ever calls it (the scenarios reach none of them).
 set -euo pipefail
 
 D="$(cd "$(dirname "${0}")" && pwd)"
@@ -30,19 +32,22 @@ OCFLAGS=(-std=c11 -O1 -g -Wall -Wextra -Werror -Wshadow -Wcast-align -Wstrict-pr
          -Wno-sign-conversion)
 
 OBJS=()
-for f in link_dp_training link_dp_training_8b_10b link_dp_phy; do
-  ${N48_CC} "${LCFLAGS[@]}" "${LINC[@]}" -c "${DISP}/dc/link/protocols/${f}.c" -o "${OUT}/${f}.o"
-  OBJS+=("${OUT}/${f}.o")
+for f in protocols/link_dp_training protocols/link_dp_training_8b_10b protocols/link_dp_phy protocols/link_dp_capability \
+         protocols/link_edp_panel_control link_validation; do
+  o="${OUT}/$(basename "${f}").o"
+  ${N48_CC} "${LCFLAGS[@]}" "${LINC[@]}" -c "${DISP}/dc/link/${f}.c" -o "${o}"
+  OBJS+=("${o}")
 done
 ${N48_CC} "${LCFLAGS[@]}" "${LINC[@]}" -I"${D}" -c "${D}/linux_side.c" -o "${OUT}/linux_side.o"
 ${N48_CC} "${OCFLAGS[@]}" -c "${ROOT}/src/dcn41/dcn41_dp_train.c" -o "${OUT}/dcn41_dp_train.o"
-${N48_CC} -std=c11 -O1 -g -Wall -Wextra -Werror -I"${D}" -I"${ROOT}/src/dcn41" -c "${D}/sink.c" -o "${OUT}/sink.o"
-${N48_CC} -std=c11 -O1 -g -Wall -Wextra -Werror -I"${D}" -I"${ROOT}/src/dcn41" -c "${D}/main.c" -o "${OUT}/main.o"
+for f in sink main; do
+  ${N48_CC} -std=c11 -O1 -g -Wall -Wextra -Werror -I"${D}" -I"${ROOT}/src/dcn41" -c "${D}/${f}.c" -o "${OUT}/${f}.o"
+done
 OBJS+=("${OUT}/linux_side.o" "${OUT}/dcn41_dp_train.o" "${OUT}/sink.o" "${OUT}/main.o")
 
-# the stubs: whatever the link still misses
-: > "${OUT}/stubs.c"
-MISSING=$(${N48_CC} "${OBJS[@]}" -o "${OUT}/dptrain" 2>&1 | sed -n "s/.*undefined reference to \`\([A-Za-z_][A-Za-z0-9_]*\)'.*/\1/p" | sort -u || true)
+# the stubs: whatever a first link still misses (that link is expected to fail; sed and sort are not)
+LINK_OUT="$(${N48_CC} "${OBJS[@]}" -o "${OUT}/dptrain" 2>&1 || true)"
+MISSING="$(printf '%s\n' "${LINK_OUT}" | sed -n "s/.*undefined reference to \`\([A-Za-z_][A-Za-z0-9_]*\)'.*/\1/p" | sort -u)"
 {
   echo '#include <stdio.h>'
   echo '#include <stdlib.h>'

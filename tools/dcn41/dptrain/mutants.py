@@ -9,6 +9,7 @@ import pathlib, subprocess, sys
 
 # (id, exact text in dcn41_dp_train.c, replacement, the mistake)
 MUTANTS = [
+    # one training
     ("same-vs-limit", "#define LT_MAX_SAME_VS         5u", "#define LT_MAX_SAME_VS         6u",
      "six identical swing requests before CR gives up"),
     ("eq-one-round-short", "round <= LT_MAX_EQ_ROUND", "round < LT_MAX_EQ_ROUND", "five EQ rounds instead of six"),
@@ -19,8 +20,7 @@ MUTANTS = [
     ("no-max-swing-flag", "vs | ((vs == LT_MAX_LEVEL) ? 0x04u : 0u)", "vs | 0u", "MAX_SWING_REACHED never set"),
     ("no-max-pe-flag", "((pe == LT_MAX_LEVEL) ? 0x20u : 0u)", "0u", "MAX_PRE_EMPHASIS_REACHED never set"),
     ("no-pe-clamp", "if (pe > LT_MAX_LEVEL - vs)", "if (0)", "pre-emphasis not limited by the swing level"),
-    ("failed-read-clears", "        return;\n    for (uint8_t l = 0; l < t->lanes; l++) {\n        t->status[l]",
-     "        for (uint32_t z = 0; z < sizeof buf; z++) buf[z] = 0;\n    for (uint8_t l = 0; l < t->lanes; l++) {\n        t->status[l]",
+    ("failed-read-clears", "buf, sizeof buf) != 0)\n        return;\n", "buf, sizeof buf) != 0)\n        zero_bytes(buf, sizeof buf);\n",
      "a failed status read is taken as all-zero status"),
     ("eq-wait-table", "400, 4000, 8000, 12000, 16000", "400, 4000, 8000, 12000, 15000", "the 16 ms EQ interval is 15 ms"),
     ("cr-wait-unit", "(raw & 0x7Fu) * 4000u", "(raw & 0x7Fu) * 4096u", "CR interval in 4.096 ms units"),
@@ -33,10 +33,10 @@ MUTANTS = [
     ("eq-ignores-align", " && (t->align & AL_INTERLANE_ALIGN_DONE))\n            return DCN41_LT_SUCCESS;",
      ")\n            return DCN41_LT_SUCCESS;", "EQ done without inter-lane alignment"),
     ("spread-33khz", "#define LT_SPREAD_05_30KHZ     0x10u", "#define LT_SPREAD_05_30KHZ     0x11u", "down-spread at 33 kHz"),
-    ("no-enhanced-framing", "b = (uint8_t)(lane_count | 0x80u | (t.post_lt_adj_granted",
+    ("no-enhanced-framing", "b = (uint8_t)(lane_count | LCS_ENHANCED_FRAMING | (t.post_lt_adj_granted",
      "b = (uint8_t)(lane_count | (t.post_lt_adj_granted", "ENHANCED_FRAMING not set"),
-    ("lane0-only", "    for (uint8_t l = 1; l < t->lanes; l++) {\n        if ((t->adjust[l] & 0x3u) > vs)",
-     "    for (uint8_t l = t->lanes; l < t->lanes; l++) {\n        if ((t->adjust[l] & 0x3u) > vs)",
+    ("lane0-only", "    for (uint8_t l = 1; l < t->lanes; l++) {\n        if (adj_vs(t->adjust[l]) > vs)",
+     "    for (uint8_t l = t->lanes; l < t->lanes; l++) {\n        if (adj_vs(t->adjust[l]) > vs)",
      "only lane 0's request is honoured"),
     ("no-max-vs-stop", "        if (t->vs == LT_MAX_LEVEL)          /* dp_is_max_vs_reached */\n            break;", "",
      "CR keeps going at maximum swing"),
@@ -51,14 +51,42 @@ MUTANTS = [
     ("old-sink-reads-interval", "if (sink->dpcd_rev >= 0x12u)\n        (void)io->aux_read(io->ctx, DCN41_DPCD_TRAINING_AUX_RD_INTERVAL, &raw, 1);\n    t.eq_wait_us",
      "(void)io->aux_read(io->ctx, DCN41_DPCD_TRAINING_AUX_RD_INTERVAL, &raw, 1);\n    t.eq_wait_us",
      "a DPCD 1.1 sink is asked for TRAINING_AUX_RD_INTERVAL"),
+    # the fallback policy
+    ("fallback-cr-keeps-rate", "            cur->rate = lower_rate(cur->rate);\n        } else if (!at_min_lanes(cur->lanes)) {",
+     "            cur->rate = cur->rate;\n        } else if (!at_min_lanes(cur->lanes)) {", "a clock-recovery failure retrains at the same rate"),
+    ("fallback-lane1-to-two", "                cur->lanes = 1;", "                cur->lanes = 2;",
+     "a lane-1 clock-recovery failure at RBR falls back to two lanes"),
+    ("fallback-lane0-keeps-going", "            if (result == DCN41_LT_CR_FAIL_LANE0)\n                return false;\n", "",
+     "a lane-0 clock-recovery failure at RBR drops lanes instead of giving up"),
+    ("fallback-eq-rate-first", "        if (!at_min_lanes(cur->lanes))\n            cur->lanes = fewer_lanes(cur->lanes);\n        else if (!at_min_rate(cur->rate))\n            lower_rate_and_cap(max, cur);",
+     "        if (!at_min_rate(cur->rate))\n            lower_rate_and_cap(max, cur);\n        else if (!at_min_lanes(cur->lanes))\n            cur->lanes = fewer_lanes(cur->lanes);",
+     "an equalisation failure lowers the rate before the lane count"),
+    ("fallback-no-cap", "    max->rate = cur->rate;\n    cur->lanes = max->lanes;", "    cur->lanes = max->lanes;",
+     "an equalisation fallback does not cap the rate (a later CR fallback climbs back)"),
+    ("fallback-partial-not-handled", "    case DCN41_LT_EQ_FAIL_EQ:\n    case DCN41_LT_EQ_FAIL_CR_PARTIAL:\n", "    case DCN41_LT_EQ_FAIL_EQ:\n",
+     "a partial CR loss in EQ has no fallback"),
+    # the retry loop
+    ("retries-ignore-bw-low", "        if (status == DCN41_LT_SUCCESS && !bw_low) {", "        if (status == DCN41_LT_SUCCESS) {",
+     "a link too slow for the stream counts as trained"),
+    ("retries-phy-off-after-last", "        if (j == attempts - 1)                          /* the last attempt failed: keep the PHY on, give up */\n            break;\n", "",
+     "the last failed attempt switches the PHY off"),
+    ("retries-delay-constant", "            delay_ms += LT_RETRY_DELAY_MS;\n", "", "the delay between attempts does not grow"),
+    ("retries-no-d3", "        b = DP_POWER_D3;\n        (void)io->aux_write(io->ctx, DCN41_DPCD_SET_POWER, &b, 1);\n", "",
+     "the sink is not put to D3 between attempts"),
+    ("retries-no-stream-enc", "    io->stream_encoder_setup(io->ctx);                  /* link_hwss->setup_stream_encoder, 8b/10b: before the loop */\n", "",
+     "the stream encoder is not set up"),
+    ("panel-mode-write-skipped", "            b = (uint8_t)(b & ~EDP_CFG_PANEL_MODE_EDP);\n            (void)io->aux_write(io->ctx, DCN41_DPCD_EDP_CONFIGURATION_SET, &b, 1);\n", "",
+     "a sink reporting PANEL_MODE_EDP keeps it"),
+    ("bw-bits-per-byte", "#define BW_BITS_PER_DP_BYTE 10u", "#define BW_BITS_PER_DP_BYTE 8u", "link bandwidth from 8 bits per DP byte"),
+    ("bw-efficiency", "#define BW_EFFICIENCY_X10000 8000u", "#define BW_EFFICIENCY_X10000 8100u", "81 % data efficiency"),
 ]
 
 
 def main():
     root, out, cc = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3:]
     src = (root / "src/dcn41/dcn41_dp_train.c").read_text()
-    objs = [str(out / f) for f in ("link_dp_training.o", "link_dp_training_8b_10b.o", "link_dp_phy.o", "linux_side.o",
-                                   "sink.o", "main.o", "stubs.o")]
+    objs = [str(out / f) for f in ("link_dp_training.o", "link_dp_training_8b_10b.o", "link_dp_phy.o", "link_dp_capability.o",
+                                   "link_edp_panel_control.o", "link_validation.o", "linux_side.o", "sink.o", "main.o", "stubs.o")]
     escaped = 0
     for mid, old, new, what in MUTANTS:
         if src.count(old) != 1:

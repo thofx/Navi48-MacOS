@@ -32,15 +32,15 @@ fetch_sparse() {
   local dir="${1}" repo="${2}" rev="${3}"
   shift 3
   # the marker names the revision and the patterns: a new pattern list fetches again
-  local done="${dir}/.n48-done-${rev}-$(printf '%s\n' "${@}" | cksum | cut -d' ' -f1)"
-  [ -f "${done}" ] && return 0
+  local marker="${dir}/.n48-done-${rev}-$(printf '%s\n' "${@}" | cksum | cut -d' ' -f1)"
+  [ -f "${marker}" ] && return 0
   rm -rf "${dir}"
   git init -q "${dir}"
   git -C "${dir}" remote add origin "${repo}"
   git -C "${dir}" sparse-checkout set --no-cone "${@}"
   git -C "${dir}" fetch -q --depth 1 --filter=blob:none origin "${rev}"
   git -C "${dir}" checkout -q FETCH_HEAD
-  touch "${done}"
+  touch "${marker}"
 }
 
 fetch_sparse "${CACHE}/vulkan-headers" "${VKH_REPO}" "${VKH_TAG}" '/include/' >&2

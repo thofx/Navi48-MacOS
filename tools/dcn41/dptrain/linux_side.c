@@ -1,13 +1,15 @@
-/* linux_side.c - Linux's dp_perform_link_training (link_dp_training.c, link_dp_training_8b_10b.c, link_dp_phy.c, all
- * compiled unmodified) on one dc_link wired to the scripted sink. The functions defined here are the ones a training
- * reaches outside those three files; they behave as on DCN 4.01 with a sink connected directly to the DIO (no LTTPR, no
- * FEC, no DPIA). Every other undefined symbol is a generated stub that aborts if a scenario ever reaches it (run.sh). */
+/* linux_side.c - Linux's dp_perform_link_training and perform_link_training_with_retries (link_dp_training.c,
+ * link_dp_training_8b_10b.c, link_dp_phy.c, link_dp_capability.c, link_validation.c, all compiled unmodified) on one
+ * dc_link wired to the scripted sink (link_edp_panel_control.c too, for the panel-mode step of the mode-set). The functions defined here are the ones a training reaches outside those files;
+ * they behave as on DCN 4.01 with a DP sink connected directly to the DIO (no LTTPR, no FEC, no DPIA, no eDP, no MST).
+ * Every other undefined symbol is a generated stub that aborts if a scenario ever reaches it (run.sh). */
 #include "link_dp_training.h"
 #include "link_dp_phy.h"
 #include "link_dpcd.h"
 #include "link_hwss.h"
 #include "link_enc_cfg.h"
 #include "core_types.h"
+#include "clk_mgr.h"
 
 #include "sink.h"
 
@@ -17,6 +19,13 @@ static struct dc_link link;
 static struct link_encoder enc;
 static struct link_encoder_funcs enc_funcs;
 static struct link_hwss hwss;
+static struct clk_mgr clk_mgr;
+static struct clk_mgr_funcs clk_mgr_funcs;
+static struct clock_source clock_source;
+static struct dc_stream_state stream;
+static struct pipe_ctx pipe;
+static struct dc_state state;
+static const struct scenario *running;
 unsigned linux_warnings;
 
 void dcn41_shim_warn(const char *file, int line) { (void)file; (void)line; linux_warnings++; }
@@ -33,6 +42,7 @@ enum dc_status core_link_write_dpcd(struct dc_link *l, uint32_t address, const u
     return sink_write(address, data, size) ? DC_ERROR_UNEXPECTED : DC_OK;
 }
 
+/* link_hwss: the PHY's lane settings and test pattern, the stream encoder */
 static void set_lanes(struct dc_link *l, const struct link_resource *res, const struct dc_link_settings *s,
                       const struct dc_lane_settings ls[LANE_COUNT_DP_MAX])
 {
@@ -55,18 +65,39 @@ static void set_pattern(struct dc_link *l, const struct link_resource *res, stru
     default: trace("PAT other %d", (int)p->dp_phy_pattern); break;
     }
 }
+static void setup_stream_encoder(struct pipe_ctx *p) { (void)p; trace("STREAM-ENC"); }
 const struct link_hwss *get_link_hwss(const struct dc_link *l, const struct link_resource *res) { (void)l; (void)res; return &hwss; }
 static void fec_set_ready(struct link_encoder *e, bool ready) { (void)e; trace("FEC ready=%d", ready); }
 
-struct link_encoder *link_enc_cfg_get_link_enc(const struct dc_link *l) { (void)l; return &enc; }
-enum dp_panel_mode dp_get_panel_mode(struct dc_link *l) { (void)l; return DP_PANEL_MODE_DEFAULT; }
-bool dp_is_lttpr_present(struct dc_link *l) { (void)l; return false; }
-uint8_t dp_parse_lttpr_repeater_count(uint8_t lttpr_repeater_count) { (void)lttpr_repeater_count; return 0; }
-uint32_t dp_get_closest_lttpr_offset(uint8_t lttpr_count) { (void)lttpr_count; return 0; }
-bool dp_should_enable_fec(const struct dc_link *l) { (void)l; return false; }
-enum dp_link_encoding link_dp_get_encoding_format(const struct dc_link_settings *s)
+/* dc hwss: the link output */
+static void enable_dp_link_output(struct dc_link *l, const struct link_resource *res, enum signal_type signal,
+                                  enum clock_source_id cs, const struct dc_link_settings *s)
 {
-    return (s->link_rate >= LINK_RATE_LOW && s->link_rate <= LINK_RATE_HIGH3) ? DP_8b_10b_ENCODING : DP_128b_132b_ENCODING;
+    (void)l; (void)res; (void)signal; (void)cs;
+    trace("PHY ON rate=0x%02x lanes=%u", (unsigned)s->link_rate, (unsigned)s->lane_count);
+}
+static void disable_link_output(struct dc_link *l, const struct link_resource *res, enum signal_type signal)
+{
+    (void)l; (void)res; (void)signal;
+    trace("PHY OFF");
+}
+
+struct link_encoder *link_enc_cfg_get_link_enc(const struct dc_link *l) { (void)l; return &enc; }
+/* dp_is_fec_supported asks for the DIO encoder this way first (resource.c): the one encoder, with fec_supported 0 */
+struct link_encoder *get_temp_dio_link_enc(const struct resource_context *res_ctx, const struct resource_pool *const pool,
+                                           const struct dc_link *l)
+{
+    (void)res_ctx; (void)pool; (void)l;
+    return &enc;
+}
+/* dp_is_lttpr_present, dp_should_enable_fec, link_dp_get_encoding_format and the LTTPR helpers come from Linux's own
+ * link_dp_capability.c (with the zeroed dpcd_caps: no LTTPR, no FEC); dp_get_panel_mode, dp_set_panel_mode and
+ * edp_set_panel_assr from link_edp_panel_control.c (a DP sink: DP_PANEL_MODE_DEFAULT). */
+/* the stream's bandwidth is a scenario input, not something under test */
+uint32_t dc_bandwidth_in_kbps_from_timing(const struct dc_crtc_timing *timing, const enum dc_link_encoding_format enc_fmt)
+{
+    (void)timing; (void)enc_fmt;
+    return running->req_kbps;
 }
 /* debug bookkeeping (link_dp_trace.c): nothing a training decides on */
 void dp_trace_lt_total_count_increment(struct dc_link *l, bool in_detection) { (void)l; (void)in_detection; }
@@ -76,18 +107,28 @@ void dp_trace_set_lt_start_timestamp(struct dc_link *l, bool in_detection) { (vo
 void dp_trace_set_lt_end_timestamp(struct dc_link *l, bool in_detection) { (void)l; (void)in_detection; }
 void dp_trace_commit_lt_init(struct dc_link *l) { (void)l; }
 
-int linux_train(const struct scenario *s)
+static void setup(const struct scenario *s)
 {
-    struct link_resource res = { 0 };
-    struct dc_link_settings ls = { 0 };
-
+    running = s;
     memset(&dc, 0, sizeof dc);
     memset(&ctx, 0, sizeof ctx);
     memset(&link, 0, sizeof link);
     memset(&enc, 0, sizeof enc);
     memset(&hwss, 0, sizeof hwss);
     memset(&enc_funcs, 0, sizeof enc_funcs);
+    memset(&clk_mgr, 0, sizeof clk_mgr);
+    memset(&clk_mgr_funcs, 0, sizeof clk_mgr_funcs);
+    memset(&clock_source, 0, sizeof clock_source);
+    memset(&stream, 0, sizeof stream);
+    memset(&pipe, 0, sizeof pipe);
+    memset(&state, 0, sizeof state);
     ctx.dc = &dc;
+    dc.ctx = &ctx;
+    dc.clk_mgr = &clk_mgr;
+    dc.current_state = &state;
+    clk_mgr.funcs = &clk_mgr_funcs;
+    dc.hwss.enable_dp_link_output = enable_dp_link_output;
+    dc.hwss.disable_link_output = disable_link_output;
     link.ctx = &ctx;
     link.dc = &dc;
     link.ep_type = DISPLAY_ENDPOINT_PHY;
@@ -103,9 +144,36 @@ int linux_train(const struct scenario *s)
     enc_funcs.fec_set_ready = fec_set_ready;
     hwss.ext.set_dp_lane_settings = set_lanes;
     hwss.ext.set_dp_link_test_pattern = set_pattern;
-    res.dio_link_enc = &enc;
+    hwss.setup_stream_encoder = setup_stream_encoder;
+    stream.link = &link;
+    stream.ctx = &ctx;
+    stream.signal = SIGNAL_TYPE_DISPLAY_PORT;
+    pipe.stream = &stream;
+    pipe.link_res.dio_link_enc = &enc;
+    pipe.clock_source = &clock_source;
+}
+
+int linux_train(const struct scenario *s)
+{
+    struct dc_link_settings ls = { 0 };
+
+    setup(s);
     ls.lane_count = (enum dc_lane_count)s->lanes;
     ls.link_rate = (enum dc_link_rate)s->rate;
     link.cur_link_settings = ls;
-    return (int)dp_perform_link_training(&link, &res, &ls, false);
+    return (int)dp_perform_link_training(&link, &pipe.link_res, &ls, false);
+}
+
+bool linux_train_with_retries(const struct scenario *s, uint8_t *rate, uint8_t *lanes)
+{
+    struct dc_link_settings ls = { 0 };
+    bool ok;
+
+    setup(s);
+    ls.lane_count = (enum dc_lane_count)s->lanes;
+    ls.link_rate = (enum dc_link_rate)s->rate;
+    ok = perform_link_training_with_retries(&ls, false, (int)s->attempts, &pipe, SIGNAL_TYPE_DISPLAY_PORT, true);
+    *rate = (uint8_t)link.cur_link_settings.link_rate;
+    *lanes = (uint8_t)link.cur_link_settings.lane_count;
+    return ok;
 }

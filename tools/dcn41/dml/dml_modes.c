@@ -10,10 +10,14 @@
  *   - no firmware-assisted memory-clock switching: FAMS2, SubVP and both DRR p-state methods are off in the PMO options;
  *   - the static DCN 4.01 SoC bounding box and IP caps (dcn4_soc_bb.h), not the SMU's clock table DC reads at boot.
  *
- * Input, one mode per line on stdin (run.sh cuts it from the TSV):
+ * Input, one mode per line on stdin (run.sh cuts it from the TSV): the timings gen_modes.py decoded from the test PC's
+ * EDIDs. The EDID capture itself is not in the public tree, so the prototype starts from the decoded timing, not the EDID.
  *   name signal pix_clk_100hz h_active h_front h_sync h_total v_active v_front v_sync v_total max_vstartup
- * Output, one line per mode: supported?, min clocks, DML's VSTARTUP against the TSV's bound, DET size, urgent watermark.
- * Exit status: 1 if a mode the TSV carries is unsupported, DML's VSTARTUP exceeds the TSV's max_vstartup, or DML asserted.
+ * Output, one line per mode: supported?, min clocks, DML's VSTARTUP, DET size, urgent watermark.
+ * What is compared: max_vstartup is the one number of the TSV that DML also produces (gen_modes.py: CalculateMaxVStartup;
+ * DML programs VSTARTUP at that maximum), so the two must be equal. The OTG register values of the TSV come from
+ * optc1_program_timing, not from DML, and are not compared here (tools/dcn41/harness.py covers the OTG side).
+ * Exit status: 1 if a mode the TSV carries is unsupported, DML's VSTARTUP differs from the TSV's max_vstartup, or DML asserted.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +41,7 @@ void dcn41_shim_warn(const char *file, int line)
 
 static void fill(struct dml2_display_cfg *cfg, const char *signal, unsigned long pix_100hz, unsigned long ha,
                  unsigned long hf, unsigned long hs, unsigned long ht, unsigned long va, unsigned long vf,
-                 unsigned long vs, unsigned long vt, int gpuvm, const struct dml2_soc_bb *bb)
+                 unsigned long vt, int gpuvm, const struct dml2_soc_bb *bb)
 {
     struct dml2_stream_parameters *st = &cfg->stream_descriptors[0];
     struct dml2_plane_parameters *pl = &cfg->plane_descriptors[0];
@@ -50,7 +54,6 @@ static void fill(struct dml2_display_cfg *cfg, const char *signal, unsigned long
     cfg->minimize_det_reallocation = true;
     cfg->num_streams = 1;
     cfg->num_planes = 1;
-    (void)vs;
 
     /* timing: populate_dml21_timing_config_from_stream_state, progressive, no borders, no DSC, 8 bpc */
     st->timing.h_active = ha;
@@ -119,7 +122,7 @@ int main(int argc, char **argv)
     struct dml2_display_cfg *cfg = calloc(1, sizeof *cfg);
     struct dml2_display_cfg_programming *prog = calloc(1, sizeof *prog);
     char name[64], signal[16], line[512];
-    unsigned long pix, ha, hf, hs, ht, va, vf, vs, vt, maxvs;
+    unsigned long pix, ha, hf, hs, ht, va, vf, vs, vt, maxvs;   /* vs (v_sync) is read to keep the line format, DML has no field for it */
     int bad = 0;
 
     if (!init || !inst || !cfg || !prog) {
@@ -143,7 +146,7 @@ int main(int argc, char **argv)
         return 2;
     }
     printf("%-22s %-4s %3s %8s %8s %8s %8s %8s %5s %5s %6s %7s %s  %s\n", "mode", "sig", "ok", "dispclk", "dppclk",
-           "dcfclk", "fclk", "uclk", "vsu", "vsmax", "det_kb", "urgent", "asserts", gpuvm ? "(gpuvm on)" : "(gpuvm off)");
+           "dcfclk", "fclk", "uclk", "vsu", "vstsv", "det_kb", "urgent", "asserts", gpuvm ? "(gpuvm on)" : "(gpuvm off)");
     while (fgets(line, sizeof line, stdin)) {
         struct dml2_check_mode_supported_in_out ms = { .dml2_instance = inst, .display_config = cfg };
         struct dml2_build_mode_programming_in_out mp = { .dml2_instance = inst, .display_config = cfg, .programming = prog };
@@ -154,7 +157,7 @@ int main(int argc, char **argv)
         if (sscanf(line, "%63s %15s %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu", name, signal, &pix, &ha, &hf, &hs, &ht,
                    &va, &vf, &vs, &vt, &maxvs) != 12)
             continue;
-        fill(cfg, signal, pix, ha, hf, hs, ht, va, vf, vs, vt, gpuvm, &init->soc_bb);
+        fill(cfg, signal, pix, ha, hf, hs, ht, va, vf, vt, gpuvm, &init->soc_bb);
         n_warn = 0;
         first_warn[0] = 0;
         memset(prog, 0, sizeof *prog);
@@ -178,7 +181,7 @@ int main(int argc, char **argv)
                prog->min_clocks.dcn4x.dispclk_khz, prog->plane_programming[0].min_clocks.dcn4x.dppclk_khz,
                prog->min_clocks.dcn4x.active.dcfclk_khz, prog->min_clocks.dcn4x.active.fclk_khz,
                prog->min_clocks.dcn4x.active.uclk_khz, vsu, maxvs, det * 64, urgent, n_warn, first_warn);
-        if (!ok || vsu > maxvs || n_warn)
+        if (!ok || vsu != maxvs || n_warn)
             bad = 1;
     }
     return bad;

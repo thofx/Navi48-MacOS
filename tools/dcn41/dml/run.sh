@@ -3,7 +3,7 @@
 #   tools/dcn41/dml/run.sh [--gpuvm] [out-dir]     (default out-dir: ${N48_CACHE:-~/.cache/navi48-check}/dml-out)
 # The Linux tree and the compiler come from tools/check-deps.sh (the commit tools/dcn41 cites). The DML2.1 object list
 # is read from Linux's own dc/dml2_0/Makefile (its src/ entries; the dml21_* DC glue is not used), so a newer tree
-# brings its own file list.
+# brings its own file list. Exit 1 when a mode is unsupported, DML's VSTARTUP differs from the TSV's, or DML asserted.
 set -euo pipefail
 
 D="$(cd "$(dirname "${0}")" && pwd)"
