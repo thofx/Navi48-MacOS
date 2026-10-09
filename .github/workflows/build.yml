@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The bring-up kext, built as BUILDING.md describes, on a GitHub macOS runner: x86_64 cross-compiled on Apple silicon
+  # (the Makefile's -arch), MacKernelSDK from the RDNA4FB clone, the ten AMD firmware files from linux-firmware.
+  kext:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: MacKernelSDK from RDNA4FB (the Makefile's default MKSDK path)
+        run: git clone -q --depth 1 https://github.com/somestupidgirl/RDNA4FB ../RDNA4FB
+      - name: AMD firmware from linux-firmware (only the ten files the kext embeds, and their licence)
+        run: |
+          git clone -q --depth 1 --filter=blob:none --sparse https://gitlab.com/kernel-firmware/linux-firmware.git ../linux-firmware
+          git -C ../linux-firmware sparse-checkout set --no-cone /LICENSE.amdgpu \
+            /amdgpu/gc_12_0_1_imu.bin /amdgpu/gc_12_0_1_me.bin /amdgpu/gc_12_0_1_mec.bin /amdgpu/gc_12_0_1_pfp.bin \
+            /amdgpu/gc_12_0_1_rlc.bin /amdgpu/gc_12_0_1_uni_mes.bin /amdgpu/psp_14_0_3_sos.bin /amdgpu/psp_14_0_3_ta.bin \
+            /amdgpu/sdma_7_0_1.bin /amdgpu/smu_14_0_3.bin
+          tools/fetch-firmware.sh ../linux-firmware | tee firmware.log
+          {
+            echo "### Firmware"
+            echo "linux-firmware $(git -C ../linux-firmware log -1 --format='%h (%cs)'); the sha256 of each file against the revision the project was developed with:"
+            echo '```'
+            cat firmware.log
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Build
+        run: make -C src/navi48-bringup MKSDK="${GITHUB_WORKSPACE}/../RDNA4FB/MacKernelSDK" all
+      - name: Check the result (BUILDING.md)
+        run: |
+          K=src/navi48-bringup/build/Navi48Bringup.kext
+          dwarfdump --uuid "${K}/Contents/MacOS/Navi48Bringup"
+          codesign --verify --strict -v "${K}"
+          echo "undefined symbols (kernel, IOKit and KPI only):"
+          nm -u -arch x86_64 "${K}/Contents/MacOS/Navi48Bringup" | head -200
+      - name: Package
+        run: tar --no-xattrs -C src/navi48-bringup/build -cf "Navi48Bringup.kext-${GITHUB_SHA::7}.tar" Navi48Bringup.kext
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Navi48Bringup.kext-${{ github.sha }}
+          path: Navi48Bringup.kext-*.tar
+          retention-days: 14
+
+  # tools/check.sh on a Mac: the same host checks check.yml runs on Linux, here with Xcode's clang and SDK (the path
+  # BUILDING.md's reader takes), which the Linux job cannot exercise.
+  host-checks-macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/navi48-check
+          key: navi48-check-macos-${{ hashFiles('tools/check-deps.sh') }}
+      - run: tools/check.sh
