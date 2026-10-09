@@ -106,18 +106,28 @@ jobs:
           key: radv-${{ runner.os }}-intel-${{ hashFiles('mesa-patches/*') }}
       - name: RADV (Mesa + mesa-patches, x86_64, ACO only)
         run: |
-          export PATH="${HOME}/venv/bin:${PATH}"
-          if [ ! -f ../mesa/build-x86_64/src/amd/vulkan/libvulkan_radeon.dylib ]; then
-            rm -rf ../mesa
-            git init -q ../mesa && git -C ../mesa remote add origin https://gitlab.freedesktop.org/mesa/mesa.git
-            git -C ../mesa fetch -q --depth 1 origin "${MESA_SHA}" && git -C ../mesa checkout -q FETCH_HEAD
-            git -C ../mesa -c user.name=ci -c user.email=ci@invalid am -q "${GITHUB_WORKSPACE}"/mesa-patches/*.patch
-            meson setup ../mesa/build-x86_64 ../mesa --buildtype=release -Db_ndebug=true \
-              -Dvulkan-drivers=amd -Dgallium-drivers= -Dplatforms=macos -Dopengl=false -Dglx=disabled -Degl=disabled -Dgbm=disabled \
-              -Dllvm=disabled -Dzstd=disabled -Dvalgrind=disabled -Dbuild-tests=false -Dtools=
-            ninja -C ../mesa/build-x86_64 src/amd/vulkan/libvulkan_radeon.dylib
+          set +e
+          {
+            set -e
+            export PATH="${HOME}/venv/bin:${PATH}"
+            if [ ! -f ../mesa/build-x86_64/src/amd/vulkan/libvulkan_radeon.dylib ]; then
+              rm -rf ../mesa
+              git init -q ../mesa && git -C ../mesa remote add origin https://gitlab.freedesktop.org/mesa/mesa.git
+              git -C ../mesa fetch -q --depth 1 origin "${MESA_SHA}" && git -C ../mesa checkout -q FETCH_HEAD
+              git -C ../mesa -c user.name=ci -c user.email=ci@invalid am -q "${GITHUB_WORKSPACE}"/mesa-patches/*.patch
+              meson setup ../mesa/build-x86_64 ../mesa --buildtype=release -Db_ndebug=true \
+                -Dvulkan-drivers=amd -Dgallium-drivers= -Dplatforms=macos -Dopengl=false -Dglx=disabled -Degl=disabled -Dgbm=disabled \
+                -Dllvm=disabled -Dzstd=disabled -Dvalgrind=disabled -Dbuild-tests=false -Dtools=
+              ninja -C ../mesa/build-x86_64 src/amd/vulkan/libvulkan_radeon.dylib
+            fi
+            lipo -archs ../mesa/build-x86_64/src/amd/vulkan/libvulkan_radeon.dylib
+          } 2>&1 | tee radv.log
+          rc=${PIPESTATUS[0]}
+          if [ "${rc}" -ne 0 ]; then
+            [ -f ../mesa/build-x86_64/meson-logs/meson-log.txt ] && tail -60 ../mesa/build-x86_64/meson-logs/meson-log.txt >> radv.log
+            python3 -I tools/ci-annotate.py radv radv.log
           fi
-          lipo -archs ../mesa/build-x86_64/src/amd/vulkan/libvulkan_radeon.dylib
+          exit "${rc}"
       - uses: actions/cache@v4
         with:
           path: |
@@ -126,13 +136,20 @@ jobs:
           key: n48xlate-${{ runner.os }}-intel-${{ hashFiles('third-party/metal2vulkan-n48/**') }}
       - name: metal2vulkan fork (third-party/metal2vulkan-n48, LGPL-3.0)
         run: |
-          if [ ! -d ../metal2vulkan/.git ]; then
-            git clone -q https://github.com/steelbrain/metal2vulkan ../metal2vulkan
-            git -C ../metal2vulkan checkout -q "${M2V_SHA}"
-            git -C ../metal2vulkan apply "${GITHUB_WORKSPACE}/third-party/metal2vulkan-n48/patches/0001-metal2vulkan-changes-for-n48xlate.patch"
-            cp -R "${GITHUB_WORKSPACE}/third-party/metal2vulkan-n48/n48xlate" ../metal2vulkan/
-          fi
-          rustup target add x86_64-apple-darwin
+          set +e
+          {
+            set -e
+            if [ ! -d ../metal2vulkan/.git ]; then
+              git clone -q https://github.com/steelbrain/metal2vulkan ../metal2vulkan
+              git -C ../metal2vulkan checkout -q "${M2V_SHA}"
+              git -C ../metal2vulkan apply "${GITHUB_WORKSPACE}/third-party/metal2vulkan-n48/patches/0001-metal2vulkan-changes-for-n48xlate.patch"
+              cp -R "${GITHUB_WORKSPACE}/third-party/metal2vulkan-n48/n48xlate" ../metal2vulkan/
+            fi
+            rustup target add x86_64-apple-darwin
+          } 2>&1 | tee m2v.log
+          rc=${PIPESTATUS[0]}
+          [ "${rc}" -eq 0 ] || python3 -I tools/ci-annotate.py metal2vulkan m2v.log
+          exit "${rc}"
       - name: Bundle (tools/native/navi48metal/build.sh)
         run: |
           set +e
