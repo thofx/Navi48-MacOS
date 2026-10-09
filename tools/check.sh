@@ -10,6 +10,10 @@
 #   4. the dcn41 unit tests (the tools/dcn41/build.py `unit` compile line).
 #   5. Linux's DML2.1, unmodified, on every mode of src/dcn41/dcn41_modes.tsv (tools/dcn41/dml/run.sh): each mode must be
 #      supported, DML's VSTARTUP must not exceed the table's max_vstartup, and DML must not assert.
+#   6. every src/dcn41/*.c compiled as the kext compiles it (x86_64 macOS, -mkernel, freestanding, no libc headers) and its
+#      object scanned for SSE / x87 instructions: the kext may not use the FPU (needs clang and llvm-objdump; zig: skipped).
+#   7. DP link training: Linux's dp_perform_link_training and src/dcn41/dcn41_dp_train.c on 23 scripted sinks, traces
+#      identical (tools/dcn41/dptrain/run.sh), and 8. the planted mistakes it must catch (tools/dcn41/dptrain/mutants.sh).
 # Not here: the kext suites (tools/conductor/suites.sh; many need captured fixtures that are not in the public tree), anything that
 # needs RADV / the GPU, and the planted-break scripts (CI runs tools/native/navi48metal/test-gate-plant.sh).
 set -euo pipefail
@@ -84,6 +88,35 @@ done
 
 # ---- 5. DML2.1 on the precomputed modes ----
 step "dcn41-dml" "${ROOT}/tools/dcn41/dml/run.sh" "${OUT}/dml"
+
+# ---- 6. src/dcn41 as kext code ----
+# The FP pattern: SSE / x87 registers and the scalar-double / conversion instructions (tools/dcn41/build.py's fpu_count idea).
+FP_INSN='%xmm|%ymm|%st\b|\bfld|\bfst|\bfmul|\bfadd|cvtsi2|cvtt?s[ds]2si|[a-z]+s[sd]\b'
+dcn_kext() {
+  local fp=0 f o
+  mkdir -p "${OUT}/kext"
+  printf 'double n48_fp_control(double a);\ndouble n48_fp_control(double a) { return a * 1.5; }\n' > "${OUT}/kext/fp_control.c"
+  for f in "${OUT}/kext/fp_control.c" "${DCN}"/*.c; do
+    o="${OUT}/kext/$(basename "${f}" .c).o"
+    ${N48_KEXT_CC} -target x86_64-apple-macos12.0 -mkernel -nostdinc -isystem "$(${N48_KEXT_CC} -print-resource-dir)/include" \
+      -ffreestanding -fno-builtin -fno-common -fno-stack-protector -std=c11 -Os -Wall -Wextra -Werror -I"${DCN}" -c "${f}" -o "${o}"
+    if ${N48_OBJDUMP} -d "${o}" | grep -Eq "${FP_INSN}"; then
+      [ "${f}" = "${OUT}/kext/fp_control.c" ] || { echo "FPU instruction in ${f}:"; ${N48_OBJDUMP} -d "${o}" | grep -E "${FP_INSN}" | head -3; fp=1; }
+    elif [ "${f}" = "${OUT}/kext/fp_control.c" ]; then
+      echo "the FP scan missed its positive control"; return 1
+    fi
+  done
+  [ "${fp}" -eq 0 ] && echo "$(ls "${DCN}"/*.c | wc -l) sources, no FPU instruction (positive control seen)"
+}
+if [ -n "${N48_KEXT_CC}" ] && [ -n "${N48_OBJDUMP}" ]; then
+  step "dcn41-kext-flags" dcn_kext
+else
+  echo "SKIP  dcn41-kext-flags :: needs clang and llvm-objdump (apt install clang; zig has neither -mkernel nor llvm-objdump)"
+fi
+
+# ---- 7, 8. DP link training against Linux, and the planted mistakes ----
+step "dcn41-dptrain" "${ROOT}/tools/dcn41/dptrain/run.sh" "${OUT}/dptrain"
+step "dcn41-dptrain-mutants" "${ROOT}/tools/dcn41/dptrain/mutants.sh" "${OUT}/dptrain-mutants"
 
 echo "check: ${NFAIL} failed (logs: ${OUT})"
 [ "${NFAIL}" -eq 0 ]
