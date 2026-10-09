@@ -16,7 +16,7 @@
 //
 //  mac-amdgpu is MIT-licensed (Copyright (c) lemonade-sdk contributors);
 //  see NOTICE at the root of this kext. Register semantics cross-checked
-//  against Linux amdgpu (GPL-2.0) used as documentation only.
+//  against Linux amdgpu (pm/swsmu, MIT) used as documentation only.
 //
 //  HARDWARE (RX 9070 XT, 1002:7550, SMU 14.0.3): the MP1 mailbox lives at
 //  MP1 BASE_IDX **1** — msg regMP1_SMN_C2PMSG_66 (dword 0x0082), param

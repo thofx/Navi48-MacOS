@@ -14,6 +14,15 @@ This work reuses and adapts code from two upstream projects, with thanks:
     that later writing stages will port are derived from this project, which
     proved the full Navi 48 bring-up on macOS (Apple Silicon / DriverKit).
 
-Register semantics are cross-checked against the Linux amdgpu driver
-(drivers/gpu/drm/amd/amdgpu), GPL-2.0 — used as documentation/reference only,
-no GPL code is copied into this permissively-licensed kext.
+Register semantics are cross-checked against the Linux amdgpu driver. The AMD
+GPU code in Linux (drivers/gpu/drm/amd: amdgpu, display/dc, dmub, pm, include)
+is MIT-licensed by AMD, apart from a few files this project does not use
+(amdgpu_vkms, amdgpu_atpx_handler); checked file by file against Linux 7.2.
+The licence text is in third-party/THIRD-PARTY-LICENSES.txt.
+* src/dcn41/dcn41_regs.h and dcn41_allow_ranges.h are generated from
+  include/asic_reg/dcn/dcn_4_1_0_offset.h and dcn_4_1_0_sh_mask.h. Unlike the
+  rest of include/asic_reg, those two headers carry no licence text (the offset
+  header says only "Copyright 2024 Advanced Micro Devices, Inc."); what is used
+  from them is register offsets, masks and shifts.
+* tools/dcn41/harness.py compiles unmodified Linux DC sources on the build host
+  to compare against src/dcn41; they are not part of the kext.
