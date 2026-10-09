@@ -32,7 +32,13 @@ jobs:
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
       - name: Build
-        run: make -C src/navi48-bringup MKSDK="${GITHUB_WORKSPACE}/../RDNA4FB/MacKernelSDK" all
+        # on failure the last lines become an error annotation, which the public API serves without a login (the log needs one)
+        run: |
+          set +e
+          make -C src/navi48-bringup MKSDK="${GITHUB_WORKSPACE}/../RDNA4FB/MacKernelSDK" all 2>&1 | tee make.log
+          rc=${PIPESTATUS[0]}
+          [ "${rc}" -eq 0 ] || python3 -I tools/ci-annotate.py make make.log
+          exit "${rc}"
       - name: Check the result (BUILDING.md)
         run: |
           K=src/navi48-bringup/build/Navi48Bringup.kext
@@ -58,4 +64,10 @@ jobs:
         with:
           path: ~/.cache/navi48-check
           key: navi48-check-macos-${{ hashFiles('tools/check-deps.sh') }}
-      - run: tools/check.sh
+      - name: tools/check.sh
+        run: |
+          set +e
+          tools/check.sh 2>&1 | tee check.log
+          rc=${PIPESTATUS[0]}
+          [ "${rc}" -eq 0 ] || python3 -I tools/ci-annotate.py check.sh check.log
+          exit "${rc}"
