@@ -17,13 +17,16 @@ jobs:
       - name: MacKernelSDK from RDNA4FB (the Makefile's default MKSDK path)
         run: git clone -q --depth 1 --recurse-submodules --shallow-submodules https://github.com/somestupidgirl/RDNA4FB ../RDNA4FB
       - name: AMD firmware from linux-firmware (only the ten files the kext embeds, and their licence)
+        # tag 20260622 is the last one whose ten files match the sha256 the project was developed with (tools/fetch-firmware.sh);
+        # main has newer blobs since 2026-08-10 that have never been run, so a mismatch fails the build here
         run: |
-          git clone -q --depth 1 --filter=blob:none --sparse https://gitlab.com/kernel-firmware/linux-firmware.git ../linux-firmware
+          git clone -q --depth 1 --branch 20260622 --filter=blob:none --sparse https://gitlab.com/kernel-firmware/linux-firmware.git ../linux-firmware
           git -C ../linux-firmware sparse-checkout set --no-cone /LICENSE.amdgpu \
             /amdgpu/gc_12_0_1_imu.bin /amdgpu/gc_12_0_1_me.bin /amdgpu/gc_12_0_1_mec.bin /amdgpu/gc_12_0_1_pfp.bin \
             /amdgpu/gc_12_0_1_rlc.bin /amdgpu/gc_12_0_1_uni_mes.bin /amdgpu/psp_14_0_3_sos.bin /amdgpu/psp_14_0_3_ta.bin \
             /amdgpu/sdma_7_0_1.bin /amdgpu/smu_14_0_3.bin
           tools/fetch-firmware.sh ../linux-firmware | tee firmware.log
+          ! grep -q DIFFERS firmware.log
           {
             echo "### Firmware"
             echo "linux-firmware $(git -C ../linux-firmware log -1 --format='%h (%cs)'); the sha256 of each file against the revision the project was developed with:"
@@ -53,6 +56,13 @@ jobs:
           name: Navi48Bringup.kext-${{ github.sha }}
           path: Navi48Bringup.kext-*.tar
           retention-days: 14
+      - name: navi48test (the PC-side CLI, docs/deploy.md section 2)
+        run: tools/build-navi48test.sh && lipo -archs tools/pc/navi48test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: navi48test-${{ github.sha }}
+          path: tools/pc/navi48test
+          retention-days: 14
 
   # tools/check.sh on a Mac: the same host checks check.yml runs on Linux, here with Xcode's clang and SDK (the path
   # BUILDING.md's reader takes), which the Linux job cannot exercise.
@@ -71,3 +81,80 @@ jobs:
           rc=${PIPESTATUS[0]}
           [ "${rc}" -eq 0 ] || python3 -I tools/ci-annotate.py check.sh check.log
           exit "${rc}"
+
+  # The Metal bundle, on an Intel runner so RADV and the translator are native x86_64 builds (no cross file, no Rosetta
+  # Homebrew). RADV: Mesa at the commit mesa-patches/README.txt pins plus the nine patches, ACO only (no LLVM), the macOS
+  # platform, zstd off (the meson line is not recorded upstream; this one is reconstructed). libn48xlate: upstream
+  # metal2vulkan at the commit third-party/metal2vulkan-n48/README.txt pins plus our patch and crate, built by build.sh.
+  # spvcache (Apple-derived SPIR-V for WindowServer's shaders) is not in the tree and cannot be made here: this bundle's
+  # WindowServer pipelines are fallbacks until the translate daemon has translated them (docs/deploy.md 6.4, 6.6).
+  bundle:
+    runs-on: macos-26-intel
+    env:
+      MESA_SHA: f5cb8ee032adabef599ae892ec4e42d796b84da9
+      M2V_SHA: 43c46ac8a24adf1a6e872b8a52c706ec9614fad0
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          brew install -q meson ninja pkgconf vulkan-headers
+          python3 -m venv "${HOME}/venv" && "${HOME}/venv/bin/pip" -q install mako pyyaml packaging
+      - uses: actions/cache@v4
+        with:
+          path: ../mesa/build-x86_64
+          key: radv-${{ runner.os }}-intel-${{ hashFiles('mesa-patches/*') }}
+      - name: RADV (Mesa + mesa-patches, x86_64, ACO only)
+        run: |
+          export PATH="${HOME}/venv/bin:${PATH}"
+          if [ ! -f ../mesa/build-x86_64/src/amd/vulkan/libvulkan_radeon.dylib ]; then
+            rm -rf ../mesa
+            git init -q ../mesa && git -C ../mesa remote add origin https://gitlab.freedesktop.org/mesa/mesa.git
+            git -C ../mesa fetch -q --depth 1 origin "${MESA_SHA}" && git -C ../mesa checkout -q FETCH_HEAD
+            git -C ../mesa -c user.name=ci -c user.email=ci@invalid am -q "${GITHUB_WORKSPACE}"/mesa-patches/*.patch
+            meson setup ../mesa/build-x86_64 ../mesa --buildtype=release -Db_ndebug=true \
+              -Dvulkan-drivers=amd -Dgallium-drivers= -Dplatforms=macos -Dopengl=false -Dglx=disabled -Degl=disabled -Dgbm=disabled \
+              -Dllvm=disabled -Dzstd=disabled -Dvalgrind=disabled -Dbuild-tests=false -Dtools=
+            ninja -C ../mesa/build-x86_64 src/amd/vulkan/libvulkan_radeon.dylib
+          fi
+          lipo -archs ../mesa/build-x86_64/src/amd/vulkan/libvulkan_radeon.dylib
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ../metal2vulkan/target
+          key: n48xlate-${{ runner.os }}-intel-${{ hashFiles('third-party/metal2vulkan-n48/**') }}
+      - name: metal2vulkan fork (third-party/metal2vulkan-n48, LGPL-3.0)
+        run: |
+          if [ ! -d ../metal2vulkan/.git ]; then
+            git clone -q https://github.com/steelbrain/metal2vulkan ../metal2vulkan
+            git -C ../metal2vulkan checkout -q "${M2V_SHA}"
+            git -C ../metal2vulkan apply "${GITHUB_WORKSPACE}/third-party/metal2vulkan-n48/patches/0001-metal2vulkan-changes-for-n48xlate.patch"
+            cp -R "${GITHUB_WORKSPACE}/third-party/metal2vulkan-n48/n48xlate" ../metal2vulkan/
+          fi
+          rustup target add x86_64-apple-darwin
+      - name: Bundle (tools/native/navi48metal/build.sh)
+        run: |
+          set +e
+          N48_RADV_LIB="${GITHUB_WORKSPACE}/../mesa/build-x86_64/src/amd/vulkan/libvulkan_radeon.dylib" \
+          N48_M2V_DIR="${GITHUB_WORKSPACE}/../metal2vulkan" N48_VK_INC="-I$(brew --prefix)/include" \
+            tools/native/navi48metal/build.sh 2>&1 | tee bundle.log
+          rc=${PIPESTATUS[0]}
+          [ "${rc}" -eq 0 ] || python3 -I tools/ci-annotate.py build.sh bundle.log
+          exit "${rc}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Navi48Metal.bundle-${{ github.sha }}
+          path: tools/native/navi48metal/build/Navi48Metal.bundle.tar
+          retention-days: 14
+      - name: metal2vulkan CLI for the translate daemon (docs/deploy.md 6.6), best effort
+        continue-on-error: true
+        run: |
+          cd ../metal2vulkan && cargo build -q --release --target x86_64-apple-darwin --features serde
+          lipo -archs target/x86_64-apple-darwin/release/metal2vulkan
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: metal2vulkan-${{ github.sha }}
+          path: ../metal2vulkan/target/x86_64-apple-darwin/release/metal2vulkan
+          retention-days: 14
