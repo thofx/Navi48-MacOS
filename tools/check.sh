@@ -58,9 +58,12 @@ step "bundle-protocols" python3 -I "${ROOT}/tools/check-protocols.py" "${M}/Navi
 #   test-vkdepth, -vkimage  link RADV (run them on the PC)
 #   test-xlate*             need macOS <mach-o/*.h> and libn48xlate
 #   test-m6route, test-m6x  read INSTALL.md, which is not part of the public tree
+# ASAN_OPTIONS=detect_leaks=0: these suites are written for the host Mac, whose ASan has no leak check by default, and keep their
+# source / image buffers until exit. What it hides: memory a TEST never frees. Overflows, use-after-free and UB still fail.
 bundle_test() {
   local t="${1}"
-  (cd "${M}" && ${N48_CC} -O1 -Wall -Wextra -Werror ${N48_SAN} -I. -I"${N48_VKH}" -o "${OUT}/test-${t}" "test-${t}.c" -lm && "${OUT}/test-${t}" .)
+  (cd "${M}" && ${N48_CC} -O1 -Wall -Wextra -Werror ${N48_SAN} -I. -I"${N48_VKH}" -o "${OUT}/test-${t}" "test-${t}.c" -lm \
+    && ASAN_OPTIONS="${ASAN_OPTIONS:+${ASAN_OPTIONS}:}detect_leaks=0" "${OUT}/test-${t}" .)
 }
 for t in cblog cienv crc depth dispflip drawcache gate heapalloc hotswap impcache intfmt ioalias ledger occ plane pool t1 texdesc; do
   step "test-${t}" bundle_test "${t}"
