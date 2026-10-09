@@ -16,13 +16,14 @@ GPU 寄存器，构建有误或者显卡不对都可能让机器死机或重启�
 | bring-up 期间的显示输出 | 外部项目 | 由 RDNA4FB.kext（只做显示的独立项目）负责；它的安装本文不覆盖 |
 | 辅助加速 kext `Navi48Accel.kext` | **卡住** | 它的 Makefile 需要 `tools/native/ioaccel-layout/`，仓库里没有（`tools/native/navi48accel/Makefile:12,20,24-32`） |
 | `n48nub`（发布 Metal nub；每次启用桌面都从它开始） | **卡住** | `tools/native/n48nub.c` 和 `tools/native/build.sh` 不在仓库里；接口约定是清楚的（6.3 节） |
-| Metal bundle `Navi48Metal.bundle` | **卡住** | 需要 RADV 构建（没有给 meson 配置）、LGPL 的 `libn48xlate`（能构建）、以及 `spvcache/`（源自 Apple shader，没有发布；缺了它 `build.sh:31` 直接报错） |
-| shader 翻译 daemon | **卡住** | `metal2vulkan` 可执行文件和 daemon 的安装步骤都没有脚本 |
+| Metal bundle `Navi48Metal.bundle` | **CI 能构建，但没有 spvcache** | `build` workflow 的 `bundle` job 构建 RADV（Mesa 加 `mesa-patches`，只用 ACO）和 `libn48xlate`，再跑 `build.sh`；缺 `spvcache/`（源自 Apple shader，没有发布），所以在翻译 daemon 把 shader 翻译完之前，WindowServer 的管线都是占位的（洋红色 / 空操作，`Navi48Device.m:3685`） |
+| shader 翻译 daemon | **可执行文件 CI 能构建，安装没有脚本** | `metal2vulkan` 命令行工具是 `bundle` job 的第二个产物；`/usr/local/navi48/` 和 LaunchDaemon 要照 `tools/native/autotranslate/` 手工配（6.6 节） |
 | OpenCore 配置文件（`variants/configs/*.plist`） | 缺失 | boot-arg 在 4.3 和 6.1 节反推出来；Kernel > Add 条目是标准 OpenCore 写法 |
 | 开机自动启用、多显示器 | 依赖上面卡住的部件 | |
 
 所以在一台新 PC 上，现实的第一个目标是 **第 1 到 5 节**：kext 经 OpenCore 加载，跑完 bring-up 阶梯到第 17 级，
-`navi48test info` 能报告出来，期间显示仍由 RDNA4FB 负责。第 6 节往后是 GPU 桌面需要的东西，等缺的部件有了再用。
+`navi48test info` 能报告出来，期间显示仍由 RDNA4FB 负责。第 6 节往后是 GPU 桌面需要的东西；其中两件（辅助 kext 和 `n48nub`）
+今天还无法从这个仓库做出来。
 
 ## 1. 要求
 
@@ -39,8 +40,9 @@ GPU 寄存器，构建有误或者显卡不对都可能让机器死机或重启�
 
 ## 2. 取得 kext
 
-两种方式：下载 CI 产物（`build` workflow 的 `kext` job：`Navi48Bringup.kext-<sha>.tar`，保留 14 天；里面嵌入了
-10 个 AMD 固件文件，AMD 的许可证 `LICENSE.amdgpu` 一起复制在旁边），或者按 `BUILDING.md` 在 Mac 上自己构建：
+两种方式：下载 CI 产物（`build` workflow，保留 14 天：`kext` job 上传 `Navi48Bringup.kext-<sha>.tar`，里面嵌入了
+linux-firmware tag 20260622 的 10 个 AMD 固件文件，AMD 的许可证 `LICENSE.amdgpu` 在旁边，另有 `navi48test-<sha>`；
+`bundle` job 上传 `Navi48Metal.bundle-<sha>` 和 `metal2vulkan-<sha>`，见 6.4 节），或者按 `BUILDING.md` 在 Mac 上自己构建：
 
 ```
 git clone --recurse-submodules https://github.com/somestupidgirl/RDNA4FB        # MacKernelSDK 是它的 submodule
@@ -162,9 +164,12 @@ App 可以开会话（`src/navi48-bringup/src/amd/native_s1c.cpp:1842-1872`）�
 `tools/pc/autoarm/test/fake-n48nub`）。没有 `navi48-metal=1`、native 自检没通过、或 GPU 已 hang 时，publish 会被拒绝
 （`native_metal_pure.h:40-49`）。
 
-### 6.4 Metal bundle（需要 RADV、libn48xlate 和 spvcache）
-构建输入见 `tools/native/navi48metal/build.sh:13-31`（RADV 的 dylib、按 `third-party/metal2vulkan-n48/README.txt`
-构建的 `libn48xlate.dylib`、`spvcache/`）。安装按 `m6-stage1a-deploy.sh:190`：解包到 `~/n48-metal/unpack.<时间戳>/`，
+### 6.4 Metal bundle
+CI 能构建（`build` workflow 的 `bundle` job，在 Intel runner 上：Mesa `f5cb8ee0` 加 9 个 patch，`-Dllvm=disabled
+-Dplatforms=macos -Dzstd=disabled`，再构建 metal2vulkan fork 并跑 `build.sh`；约 12 分钟）。构建输入见
+`tools/native/navi48metal/build.sh:13-31`。**它没有 `spvcache/`**：那个目录是从 Apple 自己的 shader 库翻译出来的 SPIR-V，
+没有发布，所以用这个仓库构建的 bundle 会让 WindowServer 的管线先用占位实现（渲染成洋红色、compute 空操作，
+`Navi48Device.m:3685`），直到翻译 daemon（6.6 节）在 PC 上把每个 shader 翻译完；头几次开机看起来是坏的。安装按 `m6-stage1a-deploy.sh:190`：解包到 `~/n48-metal/unpack.<时间戳>/`，
 把旧的 `/Library/GPUBundles/Navi48Metal.bundle` 移到 `~/navi48-staging/backup/`，`cp -R` 新的过去，`chown -R root:wheel`、
 `xattr -cr`、`codesign --verify --strict -v`。不需要重启。bundle 只把 Metal 设备交给 WindowServer、带 `N48M_ALLOW=1` 的
 root 工具、或 kext 准入的 App；存在 `/private/tmp/n48m-off` 或 300 秒内 WindowServer 异常启动 3 次后会拒绝
@@ -187,7 +192,10 @@ sudo navi48test accel pipereload; sudo killall -9 WindowServer    # 要在 15 �
 每次开机 `sudo navi48test accel appallow add <名字>`（`navi48test.c:1842-1845`；自动启用脚本会读
 `/Library/Application Support/Navi48/apps.txt`）。准入的 App 在进程内翻译 shader（`n48_xlate.h:4-8`）；
 WindowServer 缺的 shader 交给 `com.navi48.translate` daemon（`/usr/local/navi48/`，以 `nobody` 运行，
-`tools/native/autotranslate/pc-translate.sh:2-25`），它需要 `metal2vulkan` 可执行文件——没有发布。
+`tools/native/autotranslate/pc-translate.sh:2-25`），它需要 `metal2vulkan` 可执行文件：`bundle` job 把它作为
+`metal2vulkan-<sha>` 上传（x86_64，按 `navi48metal/add-air.py:5` 的要求带 `--features serde`）。daemon 自身的安装（把
+`tools/native/autotranslate/{pc-translate.sh,pc-translate.py,n48-translate.sb,overrides.txt,n48-llvm-dis,n48-spirv-val-stub}`
+和这个可执行文件放到 `/usr/local/navi48/`，plist 放到 `/Library/LaunchDaemons/`，再 `launchctl bootstrap system`）没有脚本。
 
 ## 7. 多显示器（M6）
 变体：`-m6` 加 `navi48-fb2=1 navi48-m6=1`；`-m6flip` 再加 `navi48-m6flip=1`；`-m6flip3` 再加 `navi48-m6flip1=1`
@@ -217,6 +225,6 @@ WindowServer 缺的 shader 交给 `com.navi48.translate` daemon（`/usr/local/na
 
 ## 10. 公开仓库里没有的东西（第 0 节的依据）
 `variants/configs/*.plist` 和救援配置；`tools/native/n48nub.c`；`tools/native/ioaccel-layout/`；
-`tools/native/navi48metal/spvcache/`；`metal2vulkan` 可执行文件和 daemon 的安装；RADV 的 meson 配置；
+`tools/native/navi48metal/spvcache/`；daemon 的安装；RADV 的 meson 配置（CI 用的那份是重建的）；
 `tools/pc/{trace-pageon,iopparse,wscomp}.d`；`re/`；两份 `INSTALL.md`；脚本引用的 `notes/*.md`；第一次点 Allow 的步骤；
 RDNA4FB 的安装方法。

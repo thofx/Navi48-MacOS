@@ -17,14 +17,14 @@ a wrong build or a different card can hang or restart the machine. Keep a way to
 | Display while bringing up | external | RDNA4FB.kext (display-only, separate project) owns the screen; its install is not described here |
 | Aux accelerator kext `Navi48Accel.kext` | **blocked** | its Makefile needs `tools/native/ioaccel-layout/`, which is not in the tree (`tools/native/navi48accel/Makefile:12,20,24-32`) |
 | `n48nub` (publishes the Metal nub; every arming step starts with it) | **blocked** | `tools/native/n48nub.c` and `tools/native/build.sh` are not in the tree; its contract is known (6.3) |
-| Metal bundle `Navi48Metal.bundle` | **blocked** | needs a RADV build (no meson config given), the LGPL `libn48xlate` (buildable), and `spvcache/` (Apple-derived, not shipped; `build.sh:31` fails without it) |
-| Shader-translate daemon | **blocked** | the `metal2vulkan` binary and the daemon's install are not scripted |
+| Metal bundle `Navi48Metal.bundle` | **built by CI, without spvcache** | the `build` workflow's `bundle` job builds RADV (Mesa plus `mesa-patches`, ACO only) and `libn48xlate`, then runs `build.sh`; `spvcache/` (Apple-derived, not shipped) is missing, so until the translate daemon has translated them, WindowServer's pipelines are fallbacks (magenta / no-op, `Navi48Device.m:3685`) |
+| Shader-translate daemon | **binary built by CI, install not scripted** | the `metal2vulkan` CLI is the `bundle` job's second artifact; `/usr/local/navi48/` and the LaunchDaemon have to be set up by hand from `tools/native/autotranslate/` (6.6) |
 | OpenCore configs (`variants/configs/*.plist`) | missing | boot-args reconstructed in 4.3 and 6.1; the Kernel > Add entry is standard OpenCore |
 | Auto-arm, multi-display | depend on the blocked pieces | |
 
 So the realistic first goal on a fresh PC is **sections 1-5**: the kext loads through OpenCore, runs the bring-up
 ladder to stage 17 and `navi48test info` reports it, while RDNA4FB keeps driving the display. Section 6 onward is what
-the GPU desktop needs once the blocked pieces exist.
+the GPU desktop needs; two of its pieces (the aux kext and `n48nub`) cannot be made from this tree today.
 
 ## 1. Requirements
 
@@ -42,9 +42,10 @@ the GPU desktop needs once the blocked pieces exist.
 
 ## 2. Get the kext
 
-Either download the CI artifact (`build` workflow, job `kext`: `Navi48Bringup.kext-<sha>.tar`, kept 14 days; it embeds
-the ten AMD firmware files, AMD's licence `LICENSE.amdgpu` is copied next to them) or build on a Mac as `BUILDING.md`
-says:
+Either download the CI artifacts (the `build` workflow, kept 14 days: job `kext` uploads `Navi48Bringup.kext-<sha>.tar`,
+with the ten AMD firmware files of linux-firmware tag 20260622 embedded and AMD's `LICENSE.amdgpu` next to them, and
+`navi48test-<sha>`; job `bundle` uploads `Navi48Metal.bundle-<sha>` and `metal2vulkan-<sha>`, section 6.4) or build on a
+Mac as `BUILDING.md` says:
 
 ```
 git clone --recurse-submodules https://github.com/somestupidgirl/RDNA4FB        # MacKernelSDK is its submodule
@@ -170,9 +171,13 @@ Its contract, if it has to be rewritten: open the kext's user client (type `'N48
 `tools/pc/autoarm/test/fake-n48nub`). Publishing is refused unless `navi48-metal=1`, the native self-test passed and
 the GPU is not hung (`native_metal_pure.h:40-49`).
 
-### 6.4 Metal bundle (needs RADV, libn48xlate and spvcache)
-Build inputs: `tools/native/navi48metal/build.sh:13-31` (RADV dylib, `libn48xlate.dylib` from
-`third-party/metal2vulkan-n48/README.txt`, `spvcache/`). Install as `m6-stage1a-deploy.sh:190`: untar into
+### 6.4 Metal bundle
+CI builds it (`build` workflow, job `bundle`, on an Intel runner: Mesa `f5cb8ee0` plus the nine patches, `-Dllvm=disabled
+-Dplatforms=macos -Dzstd=disabled`, then the metal2vulkan fork and `build.sh`; about 12 minutes). Build inputs:
+`tools/native/navi48metal/build.sh:13-31`. **It has no `spvcache/`**: that directory holds SPIR-V translated from Apple's
+own shader libraries and is not shipped, so a bundle from this tree gives WindowServer fallback pipelines (magenta render,
+no-op compute, `Navi48Device.m:3685`) until the translate daemon (6.6) has translated each shader on the PC; the first
+boots look broken. Install as `m6-stage1a-deploy.sh:190`: untar into
 `~/n48-metal/unpack.<ts>/`, move the old `/Library/GPUBundles/Navi48Metal.bundle` to `~/navi48-staging/backup/`,
 `cp -R` the new one there, `chown -R root:wheel`, `xattr -cr`, `codesign --verify --strict -v`. No reboot. The bundle
 hands a Metal device only to WindowServer, a root tool with `N48M_ALLOW=1`, or an app the kext admits; it declines when
@@ -195,7 +200,10 @@ The arm is one-way for the boot; never restart WindowServer with a user logged i
 `sudo navi48test accel appallow add <name>` per boot (`navi48test.c:1842-1845`; auto-arm reads
 `/Library/Application Support/Navi48/apps.txt`). Admitted apps translate shaders in-process (`n48_xlate.h:4-8`);
 WindowServer's misses go to the `com.navi48.translate` daemon (`/usr/local/navi48/`, user `nobody`,
-`tools/native/autotranslate/pc-translate.sh:2-25`), which needs the `metal2vulkan` binary — not shipped.
+`tools/native/autotranslate/pc-translate.sh:2-25`), which needs the `metal2vulkan` binary: the `bundle` job uploads it as
+`metal2vulkan-<sha>` (x86_64, built with `--features serde` as `navi48metal/add-air.py:5` asks). The daemon's own install (copying
+`tools/native/autotranslate/{pc-translate.sh,pc-translate.py,n48-translate.sb,overrides.txt,n48-llvm-dis,n48-spirv-val-stub}`
+and the binary to `/usr/local/navi48/`, the plist to `/Library/LaunchDaemons/`, `launchctl bootstrap system`) is not scripted.
 
 ## 7. Multi-display (M6)
 Variants: `-m6` adds `navi48-fb2=1 navi48-m6=1`; `-m6flip` adds `navi48-m6flip=1`; `-m6flip3` adds `navi48-m6flip1=1`
@@ -225,6 +233,6 @@ exactly what the manifest lists. Paths are hard-coded to `/Users/testuser` (`n48
 
 ## 10. Not in the public tree (what section 0 rests on)
 `variants/configs/*.plist` and the rescue config; `tools/native/n48nub.c`; `tools/native/ioaccel-layout/`;
-`tools/native/navi48metal/spvcache/`; the `metal2vulkan` binary and the daemon's install; the RADV meson configuration;
+`tools/native/navi48metal/spvcache/`; the daemon's install; the RADV meson configuration (CI's is a reconstruction);
 `tools/pc/{trace-pageon,iopparse,wscomp}.d`; `re/`; both `INSTALL.md`; the `notes/*.md` the scripts cite; the first
 Allow-click procedure; how RDNA4FB is installed.
