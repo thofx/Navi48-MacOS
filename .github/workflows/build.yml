@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: MacKernelSDK from RDNA4FB (the Makefile's default MKSDK path)
-        run: git clone -q --depth 1 https://github.com/somestupidgirl/RDNA4FB ../RDNA4FB
+        run: git clone -q --depth 1 --recurse-submodules --shallow-submodules https://github.com/somestupidgirl/RDNA4FB ../RDNA4FB
       - name: AMD firmware from linux-firmware (only the ten files the kext embeds, and their licence)
         run: |
           git clone -q --depth 1 --filter=blob:none --sparse https://gitlab.com/kernel-firmware/linux-firmware.git ../linux-firmware

@@ -45,9 +45,12 @@ for f in sink main; do
 done
 OBJS+=("${OUT}/linux_side.o" "${OUT}/dcn41_dp_train.o" "${OUT}/sink.o" "${OUT}/main.o")
 
-# the stubs: whatever a first link still misses (that link is expected to fail; sed and sort are not)
+# the stubs: whatever a first link still misses (that link is expected to fail; sed and sort are not). GNU ld says
+# "undefined reference to `sym'", Apple's ld "\"_sym\", referenced from:" (the C symbol with a leading underscore).
 LINK_OUT="$(${N48_CC} "${OBJS[@]}" -o "${OUT}/dptrain" 2>&1 || true)"
-MISSING="$(printf '%s\n' "${LINK_OUT}" | sed -n "s/.*undefined reference to \`\([A-Za-z_][A-Za-z0-9_]*\)'.*/\1/p" | sort -u)"
+MISSING="$(printf '%s\n' "${LINK_OUT}" \
+  | sed -n -e "s/.*undefined reference to \`\([A-Za-z_][A-Za-z0-9_]*\)'.*/\1/p" -e 's/^ *"_\([A-Za-z_][A-Za-z0-9_]*\)", referenced from:.*/\1/p' \
+  | sort -u)"
 {
   echo '#include <stdio.h>'
   echo '#include <stdlib.h>'
