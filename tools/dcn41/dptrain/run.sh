@@ -10,7 +10,7 @@ set -euo pipefail
 
 D="$(cd "$(dirname "${0}")" && pwd)"
 ROOT="$(cd "${D}/../../.." && pwd)"
-VERBOSE=()
+VERBOSE=()   # expanded as ${VERBOSE[@]+"${VERBOSE[@]}"}: an empty array is "unbound" to macOS's bash 3.2 under set -u
 if [ "${1:-}" = "-v" ]; then
   VERBOSE=(-v "${2}")
   shift 2
@@ -61,4 +61,4 @@ MISSING="$(printf '%s\n' "${LINK_OUT}" \
 } > "${OUT}/stubs.c"
 ${N48_CC} -std=c11 -O1 -w -c "${OUT}/stubs.c" -o "${OUT}/stubs.o"
 ${N48_CC} "${OBJS[@]}" "${OUT}/stubs.o" -o "${OUT}/dptrain"
-"${OUT}/dptrain" "${VERBOSE[@]}"
+"${OUT}/dptrain" ${VERBOSE[@]+"${VERBOSE[@]}"}
